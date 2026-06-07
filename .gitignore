@@ -1,8 +1,8 @@
 # Binaries
 /bin/
 bin/
-bel
-tsll
+/bel
+/tsll
 *.exe
 
 # Go
