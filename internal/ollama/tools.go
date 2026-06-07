@@ -61,7 +61,7 @@ var _ GenerateClientWithTools = (*genClient)(nil)
 const (
 	toolCallOpen  = "<tool_call>"
 	toolCallClose = "</tool_call>"
-	maxToolIter   = 30 // prevent infinite loops
+	maxToolIter   = 30 // default safeguard against infinite loops
 )
 
 // toolCallJSON is the JSON payload inside a <tool_call> block.
@@ -110,6 +110,12 @@ func (c *genClient) ChatWithTools(
 
 	// Inject tool instructions into system prompt (or prepend system message).
 	history := injectToolInstructions(msgs, tools)
+	loopLimit := maxToolIter
+	if v := ctx.Value(ctxKeyToolLoopLimit{}); v != nil {
+		if n, ok := v.(int); ok && n > 0 {
+			loopLimit = n
+		}
+	}
 
 	// Pre-load project layout and append to the last user message so the model
 	// starts with directory context — no fake assistant/tool turn needed.
@@ -133,7 +139,7 @@ func (c *genClient) ChatWithTools(
 		}
 	}
 
-	for iter := 0; iter < maxToolIter; iter++ {
+	for iter := 0; iter < loopLimit; iter++ {
 		// Convert to plain ChatMessages for ChatStream.
 		plain := make([]ChatMessage, len(history))
 		for i, h := range history {
@@ -209,7 +215,7 @@ func (c *genClient) ChatWithTools(
 		)
 	}
 
-	return "", totalUsage, fmt.Errorf("tool-calling loop exceeded %d iterations", maxToolIter)
+	return "", totalUsage, fmt.Errorf("tool-calling loop exceeded %d iterations", loopLimit)
 }
 
 // parseToolCall tries multiple formats the model might use for tool calls:
@@ -370,10 +376,20 @@ func looksLikePlan(text string) bool {
 }
 
 type ctxKeyModel struct{}
+type ctxKeyToolLoopLimit struct{}
 
 // WithModel attaches the model name to a context for ChatWithTools.
 func WithModel(ctx context.Context, model string) context.Context {
 	return context.WithValue(ctx, ctxKeyModel{}, model)
+}
+
+// WithToolLoopLimit sets max tool-calling turns for ChatWithTools.
+// Useful for fast mode to fail-fast on loops and reduce latency.
+func WithToolLoopLimit(ctx context.Context, limit int) context.Context {
+	if limit <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyToolLoopLimit{}, limit)
 }
 
 func formatArgs(args map[string]any) string {

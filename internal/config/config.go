@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,6 +14,7 @@ type Config struct {
 	OllamaHost string `yaml:"ollama_host"`
 	GPUPrefer  string `yaml:"gpu_prefer"` // amd, nvidia, auto
 	Theme      string `yaml:"theme"`
+	FastMode   bool   `yaml:"fast_mode"`
 }
 
 // Default returns sensible defaults.
@@ -22,6 +24,7 @@ func Default() Config {
 		OllamaHost: "http://127.0.0.1:11434",
 		GPUPrefer:  "amd",
 		Theme:      "k9s",
+		FastMode:   true,
 	}
 }
 
@@ -39,6 +42,11 @@ func Load() Config {
 	}
 	if v := os.Getenv("TSLL_MODEL"); v != "" {
 		cfg.Model = v
+	}
+	if v := os.Getenv("TSLL_FAST"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.FastMode = parsed
+		}
 	}
 	return cfg
 }

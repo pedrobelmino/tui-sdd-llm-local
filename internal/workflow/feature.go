@@ -23,6 +23,14 @@ type Service struct {
 	client ollama.GenerateClientWithTools
 }
 
+type featureContext struct {
+	Feature    string
+	FeatureDir string
+	Spec       string
+	Design     string
+	Tasks      string
+}
+
 // New creates a workflow service with config defaults.
 func New() *Service {
 	cfg := config.Load()
@@ -39,6 +47,26 @@ func (s *Service) Reachable(ctx context.Context) bool {
 
 // Model returns configured model name.
 func (s *Service) Model() string { return s.cfg.Model }
+
+func (s *Service) toolCtx(ctx context.Context) context.Context {
+	ctx = ollama.WithModel(ctx, s.cfg.Model)
+	if s.cfg.FastMode {
+		// Lower loop cap in fast mode to reduce tail latency on bad loops.
+		ctx = ollama.WithToolLoopLimit(ctx, 12)
+	}
+	return ctx
+}
+
+func (s *Service) warmModel(ctx context.Context) {
+	// Best-effort warm-up to avoid cold-start latency spikes.
+	_, _, _ = s.client.Chat(ctx, ollama.ChatRequest{
+		Model: s.cfg.Model,
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: "You are warm-up assistant."},
+			{Role: "user", Content: "ok"},
+		},
+	})
+}
 
 // Specify generates spec.md for a feature.
 func (s *Service) Specify(ctx context.Context, projectRoot, feature, brief string, onChunk func(string)) (ollama.TokenUsage, error) {
@@ -162,54 +190,52 @@ func (s *Service) Implement(ctx context.Context, projectRoot, feature string, on
 		return ollama.TokenUsage{}, fmt.Errorf("ollama not reachable at %s", s.cfg.OllamaHost)
 	}
 
-	featureDir := filepath.Join(projectRoot, ".specs/features", feature)
-	specPath := filepath.Join(featureDir, "spec.md")
-	specData, err := os.ReadFile(specPath)
+	fc, err := s.loadFeatureContext(projectRoot, feature)
 	if err != nil {
-		return ollama.TokenUsage{}, fmt.Errorf("read spec.md: %w (run specify first)", err)
+		return ollama.TokenUsage{}, err
 	}
+	if s.cfg.FastMode && onChunk != nil {
+		onChunk("⚡ fast mode enabled (compact context)\n")
+	}
+	s.warmModel(ctx)
 
-	tasksPath := filepath.Join(featureDir, "tasks.md")
-	if tasksData, err := os.ReadFile(tasksPath); err == nil {
-		tasks := project.ParseTasksContent(string(tasksData))
-		if len(tasks) > 0 {
-			var total ollama.TokenUsage
-			var ran bool
-			for _, task := range tasks {
-				if task.Status == "Done" {
-					continue
-				}
-				ran = true
-				if onChunk != nil {
-					onChunk(fmt.Sprintf("\n\n--- Implementing %s: %s ---\n\n", task.ID, task.Title))
-				}
-				usage, err := s.Run(ctx, projectRoot, feature, task.ID, onChunk)
-				total.PromptTokens += usage.PromptTokens
-				total.CompletionTokens += usage.CompletionTokens
-				if err != nil {
-					return total, err
-				}
+	// If tasks exist, execute only pending tasks with shared cached context.
+	tasks := project.ParseTasksContent(fc.Tasks)
+	if len(tasks) > 0 {
+		var total ollama.TokenUsage
+		var ran bool
+		for _, task := range tasks {
+			if task.Status == "Done" {
+				continue
 			}
-			if !ran {
-				return total, fmt.Errorf("feature already fully implemented")
+			ran = true
+			if onChunk != nil {
+				onChunk(fmt.Sprintf("\n\n--- Implementing %s: %s ---\n\n", task.ID, task.Title))
 			}
-			statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
-			_ = state.UpdateCurrentWork(statePath, feature+" — implemented")
-			return total, nil
+			usage, runErr := s.runTaskWithContext(ctx, projectRoot, fc, task.ID, onChunk)
+			total.PromptTokens += usage.PromptTokens
+			total.CompletionTokens += usage.CompletionTokens
+			if runErr != nil {
+				return total, runErr
+			}
 		}
+		if !ran {
+			return total, fmt.Errorf("feature already fully implemented")
+		}
+		statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
+		_ = state.UpdateCurrentWork(statePath, feature+" — implemented")
+		return total, nil
 	}
 
-	user := buildImplementUserMsg(projectRoot, feature, featureDir, "", specData, nil)
-
+	user := buildImplementUserMsg(fc, "", s.cfg.FastMode)
 	system := prompts.ImplementSystem(projectRoot)
 	msgs := []ollama.ChatMessageWithTools{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}
 
-	toolCtx := ollama.WithModel(ctx, s.cfg.Model)
 	out, usage, err := s.client.ChatWithTools(
-		toolCtx, msgs,
+		s.toolCtx(ctx), msgs,
 		fileops.Definitions(),
 		fileops.Executor(projectRoot),
 		onChunk,
@@ -218,7 +244,7 @@ func (s *Service) Implement(ctx context.Context, projectRoot, feature string, on
 		return usage, err
 	}
 
-	if err := os.WriteFile(filepath.Join(featureDir, "implement.done"), []byte(out), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(fc.FeatureDir, "implement.done"), []byte(out), 0o644); err != nil {
 		return usage, err
 	}
 
@@ -235,33 +261,33 @@ func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, 
 	if !s.Reachable(ctx) {
 		return ollama.TokenUsage{}, fmt.Errorf("ollama not reachable at %s", s.cfg.OllamaHost)
 	}
-
-	featureDir := filepath.Join(projectRoot, ".specs/features", feature)
-	tasksPath := filepath.Join(featureDir, "tasks.md")
-	specPath := filepath.Join(featureDir, "spec.md")
-
-	tasksData, err := os.ReadFile(tasksPath)
-	if err != nil {
-		return ollama.TokenUsage{}, fmt.Errorf("read tasks.md: %w", err)
+	if s.cfg.FastMode && onChunk != nil {
+		onChunk("⚡ fast mode enabled (compact context)\n")
 	}
-	specData, _ := os.ReadFile(specPath)
+	s.warmModel(ctx)
+	fc, err := s.loadFeatureContext(projectRoot, feature)
+	if err != nil {
+		return ollama.TokenUsage{}, err
+	}
+	return s.runTaskWithContext(ctx, projectRoot, fc, taskID, onChunk)
+}
 
-	block := extractTaskBlock(string(tasksData), taskID)
+func (s *Service) runTaskWithContext(ctx context.Context, projectRoot string, fc featureContext, taskID string, onChunk func(string)) (ollama.TokenUsage, error) {
+	block := extractTaskBlock(fc.Tasks, taskID)
 	if block == "" {
 		return ollama.TokenUsage{}, fmt.Errorf("task %s not found", taskID)
 	}
 
-	system := prompts.RunSystem(projectRoot, block, string(specData))
-	user := buildImplementUserMsg(projectRoot, feature, featureDir, block, specData, nil)
+	system := prompts.RunSystem(projectRoot, block, fc.Spec)
+	user := buildImplementUserMsg(fc, block, s.cfg.FastMode)
 
 	msgs := []ollama.ChatMessageWithTools{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}
 
-	toolCtx := ollama.WithModel(ctx, s.cfg.Model)
 	out, usage, err := s.client.ChatWithTools(
-		toolCtx, msgs,
+		s.toolCtx(ctx), msgs,
 		fileops.Definitions(),
 		fileops.Executor(projectRoot),
 		onChunk,
@@ -270,28 +296,56 @@ func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, 
 		return usage, err
 	}
 
+	tasksPath := filepath.Join(fc.FeatureDir, "tasks.md")
 	_ = state.UpdateTaskStatus(tasksPath, taskID, "✅ Done")
 	statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
-	_ = state.UpdateCurrentWork(statePath, feature+" — "+taskID+" executed")
+	_ = state.UpdateCurrentWork(statePath, fc.Feature+" — "+taskID+" executed")
 	_ = state.AppendDecision(statePath, "Task "+taskID+" executed", truncate(out, 200), "tsll run from TUI/CLI")
 
 	return usage, nil
 }
 
-// buildImplementUserMsg constructs the user message for Run/Implement, providing
-// all spec artefacts inline so the model does not try to re-read them via tools.
-// taskBlock is empty for full-feature implementation (Implement without tasks.md).
-func buildImplementUserMsg(projectRoot, feature, featureDir, taskBlock string, specData []byte, _ []byte) string {
+func (s *Service) loadFeatureContext(projectRoot, feature string) (featureContext, error) {
+	featureDir := filepath.Join(projectRoot, ".specs/features", feature)
+	specPath := filepath.Join(featureDir, "spec.md")
+	specData, err := os.ReadFile(specPath)
+	if err != nil {
+		return featureContext{}, fmt.Errorf("read spec.md: %w (run specify first)", err)
+	}
+	fc := featureContext{
+		Feature:    feature,
+		FeatureDir: featureDir,
+		Spec:       string(specData),
+	}
+	if designData, err := os.ReadFile(filepath.Join(featureDir, "design.md")); err == nil {
+		fc.Design = string(designData)
+	}
+	if tasksData, err := os.ReadFile(filepath.Join(featureDir, "tasks.md")); err == nil {
+		fc.Tasks = string(tasksData)
+	}
+	return fc, nil
+}
+
+// buildImplementUserMsg constructs the user message for Run/Implement.
+// taskBlock is empty for full-feature implementation.
+func buildImplementUserMsg(fc featureContext, taskBlock string, fastMode bool) string {
 	var b strings.Builder
 
-	b.WriteString("Feature: " + feature + "\n")
-	b.WriteString("Feature spec directory: .specs/features/" + feature + "/\n")
+	b.WriteString("Feature: " + fc.Feature + "\n")
+	b.WriteString("Feature spec directory: .specs/features/" + fc.Feature + "/\n")
 
 	// List the feature dir so the model knows what files exist there.
-	if entries, err := os.ReadDir(featureDir); err == nil {
-		b.WriteString("Files in .specs/features/" + feature + "/:\n")
-		for _, e := range entries {
+	if entries, err := os.ReadDir(fc.FeatureDir); err == nil {
+		b.WriteString("Files in .specs/features/" + fc.Feature + "/:\n")
+		limit := len(entries)
+		if fastMode && limit > 12 {
+			limit = 12
+		}
+		for _, e := range entries[:limit] {
 			b.WriteString("  " + e.Name() + "\n")
+		}
+		if limit < len(entries) {
+			b.WriteString("  ...\n")
 		}
 	}
 	b.WriteString("\n")
@@ -301,17 +355,29 @@ func buildImplementUserMsg(projectRoot, feature, featureDir, taskBlock string, s
 		b.WriteString(taskBlock + "\n\n")
 	}
 
-	if len(specData) > 0 {
+	if fc.Spec != "" {
+		specMax := 3000
+		if fastMode {
+			specMax = 1400
+		}
 		b.WriteString("## spec.md (already loaded — do NOT read via tool)\n\n")
-		b.WriteString(truncate(string(specData), 3000) + "\n\n")
+		b.WriteString(truncate(fc.Spec, specMax) + "\n\n")
 	}
-	if designData, err := os.ReadFile(filepath.Join(featureDir, "design.md")); err == nil {
+	if fc.Design != "" {
+		designMax := 2000
+		if fastMode {
+			designMax = 900
+		}
 		b.WriteString("## design.md (already loaded — do NOT read via tool)\n\n")
-		b.WriteString(truncate(string(designData), 2000) + "\n\n")
+		b.WriteString(truncate(fc.Design, designMax) + "\n\n")
 	}
-	if tasksData, err := os.ReadFile(filepath.Join(featureDir, "tasks.md")); err == nil {
+	if taskBlock == "" && fc.Tasks != "" {
+		tasksMax := 1500
+		if fastMode {
+			tasksMax = 700
+		}
 		b.WriteString("## tasks.md (already loaded — do NOT read via tool)\n\n")
-		b.WriteString(truncate(string(tasksData), 1500) + "\n\n")
+		b.WriteString(truncate(fc.Tasks, tasksMax) + "\n\n")
 	}
 
 	b.WriteString("---\n")
