@@ -132,6 +132,46 @@ func TestListFeatures_WithBadges(t *testing.T) {
 	}
 }
 
+func TestFeatureImplemented_AllTasksDone(t *testing.T) {
+	root := t.TempDir()
+	featureDir := filepath.Join(root, "landing-page")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tasks := `# Tasks
+
+## Status Tracker
+
+| Task | Status |
+| ---- | ------ |
+| T1   | ✅ Done |
+| T2   | ✅ Done |
+
+### T1: First
+### T2: Second
+`
+	if err := os.WriteFile(filepath.Join(featureDir, "tasks.md"), []byte(tasks), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !featureImplemented(featureDir) {
+		t.Fatal("expected implemented when all tasks done")
+	}
+}
+
+func TestFeatureImplemented_MarkerWithoutTasks(t *testing.T) {
+	root := t.TempDir()
+	featureDir := filepath.Join(root, "auth")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(featureDir, "implement.done"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !featureImplemented(featureDir) {
+		t.Fatal("expected implemented via implement.done marker")
+	}
+}
+
 func TestListFeatures_EmptyDir(t *testing.T) {
 	root := t.TempDir()
 	features, err := ListFeatures(root)

@@ -23,11 +23,12 @@ func RenderFeatureDetail(d FeatureDetailData) string {
 	var b strings.Builder
 
 	meta := fmt.Sprintf(
-		"Feature: %s\nSpec: %s  Tasks: %s  Design: %s\n%s\n",
+		"Feature: %s\nSpec: %s  Design: %s  Tasks: %s  Impl: %s\n%s\n",
 		d.Feature.Name,
 		badge(d.Feature.HasSpec),
-		badge(d.Feature.HasTasks),
 		badge(d.Feature.HasDesign),
+		badge(d.Feature.HasTasks),
+		badge(d.Feature.HasImplement),
 		d.Progress,
 	)
 	b.WriteString(ui.Panel("Feature", meta, d.Width-6, 7))
@@ -53,7 +54,7 @@ func RenderFeatureDetail(d FeatureDetailData) string {
 	b.WriteString("\n")
 	b.WriteString(padLines(ui.Panel("Tasks", body, d.Width-6, h), 3))
 
-	help := "s:spec  t:tasks  e:run  j/k:nav  esc:back"
+	help := "s:spec  d:design  t:tasks  e:run  a:impl  j/k:nav  esc:back"
 	b.WriteString("\n")
 	b.WriteString(padLines(ui.Panel("Actions", help, d.Width-6, 4), 3))
 

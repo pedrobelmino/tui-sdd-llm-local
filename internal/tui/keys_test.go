@@ -16,7 +16,7 @@ func TestKeyMap_FooterBindings(t *testing.T) {
 
 func TestHelpOverlay_DocumentsAllKeys(t *testing.T) {
 	got := HelpOverlay()
-	for _, phrase := range []string{"new feature", "open feature detail", "run task", "esc"} {
+	for _, phrase := range []string{"new feature", "open feature detail", "implement feature", "run selected task", "esc"} {
 		if !strings.Contains(got, phrase) {
 			t.Fatalf("HelpOverlay() missing %q:\n%s", phrase, got)
 		}

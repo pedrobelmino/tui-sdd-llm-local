@@ -37,6 +37,35 @@ func TestModel_SwitchView(t *testing.T) {
 	}
 }
 
+func TestModel_FeaturesImplementKeyStartsAction(t *testing.T) {
+	m := newTestModel()
+	m.activeView = ViewFeatures
+	m.project = project.ProjectContext{Valid: true, Root: t.TempDir()}
+	m.features = []project.FeatureEntry{{Name: "landing-page", HasSpec: true}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m2 := updated.(RootModel)
+	if m2.screen != ScreenAction || m2.actionKind != ActionImplement {
+		t.Fatalf("expected implement action, got screen=%v kind=%v", m2.screen, m2.actionKind)
+	}
+}
+
+func TestModel_FeaturesDesignKeyStartsAction(t *testing.T) {
+	m := newTestModel()
+	m.activeView = ViewFeatures
+	m.project = project.ProjectContext{Valid: true, Root: t.TempDir()}
+	m.features = []project.FeatureEntry{{Name: "landing-page", HasSpec: true}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m2 := updated.(RootModel)
+	if m2.screen != ScreenAction || m2.actionKind != ActionDesign {
+		t.Fatalf("expected design action, got screen=%v kind=%v", m2.screen, m2.actionKind)
+	}
+	if m2.selectedFeature != "landing-page" {
+		t.Fatalf("expected landing-page, got %q", m2.selectedFeature)
+	}
+}
+
 func TestModel_ToggleHelp(t *testing.T) {
 	m := newTestModel()
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
@@ -150,7 +179,7 @@ func TestModel_SystemSnapshotMsg(t *testing.T) {
 	}
 }
 
-func TestModel_ActionScreenShowsMonitor(t *testing.T) {
+func TestModel_ActionScreenShowsFooterMonitor(t *testing.T) {
 	m := newTestModel()
 	m.screen = ScreenAction
 	m.actionRunning = true
@@ -164,16 +193,76 @@ func TestModel_ActionScreenShowsMonitor(t *testing.T) {
 		Available: true,
 		Devices: []gpu.Device{{Vendor: gpu.VendorAMD, Utilization: 40, MemoryUsed: 3000, MemoryTotal: 4096}},
 	}
+	m.system = system.Snapshot{
+		Available: true,
+		CPU:       system.CPUInfo{Utilization: 22, HasBaseline: true},
+		Memory:    system.MemoryInfo{TotalMiB: 16000, UsedMiB: 8000},
+		Load:      system.LoadAvg{One: 1.2},
+	}
 
 	out := m.View()
-	for _, want := range []string{"Monitor", "qwen2.5-coder:latest", "AMD 40%", "Generating spec: landing-page"} {
+	for _, want := range []string{
+		"Monitor", "qwen2.5-coder", "GPU AMD 40%", "CPU 22%", "MEM 50%", "Ld 1.2",
+		"Generating spec: landing-page",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("action view missing %q:\n%s", want, out)
 		}
 	}
+	genIdx := strings.Index(out, "Generating spec")
+	monIdx := strings.LastIndex(out, "Monitor")
+	if genIdx < 0 || monIdx < 0 || genIdx > monIdx {
+		t.Fatalf("footer monitor should appear after main content (gen=%d mon=%d)", genIdx, monIdx)
+	}
 }
 
-func TestModel_FormScreenShowsMonitor(t *testing.T) {
+func TestModel_FeaturesViewShowsFooterMonitor(t *testing.T) {
+	m := newTestModel()
+	m.activeView = ViewFeatures
+	m.ollama = ollama.Snapshot{Reachable: true, Running: []ollama.RunningModel{{Name: "phi3:mini"}}}
+	m.gpu = gpu.Snapshot{
+		Available: true,
+		Devices:   []gpu.Device{{Vendor: gpu.VendorAMD, Utilization: 10, MemoryUsed: 512, MemoryTotal: 4096}},
+	}
+	m.tokens = tokens.SessionCounter{PromptTokens: 500, CompletionTokens: 200, RequestCount: 2}
+	m.system = system.Snapshot{
+		Available: true,
+		CPU:       system.CPUInfo{Utilization: 15, HasBaseline: true},
+		Memory:    system.MemoryInfo{TotalMiB: 8000, UsedMiB: 3200},
+		Load:      system.LoadAvg{One: 0.5},
+	}
+
+	out := m.View()
+	for _, want := range []string{"Monitor", "phi3", "GPU AMD", "Tok 500+200", "CPU 15%", "MEM 40%"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("features view missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "Monitor") != 1 {
+		t.Fatalf("expected single footer monitor panel, got:\n%s", out)
+	}
+}
+
+func TestModel_OverviewShowsTopMonitorStrip(t *testing.T) {
+	m := newTestModel()
+	m.activeView = ViewOverview
+	m.ollama = ollama.Snapshot{Reachable: true, Running: []ollama.RunningModel{{Name: "llama3:8b"}}}
+	m.gpu = gpu.Snapshot{
+		Available: true,
+		Devices:   []gpu.Device{{Vendor: gpu.VendorAMD, Utilization: 5, MemoryUsed: 100, MemoryTotal: 8000}},
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "Monitor") {
+		t.Fatal("overview should show top monitor strip")
+	}
+	// Top strip has separate Token line (not compact Tok prefix).
+	if !strings.Contains(out, "Tokens:") {
+		t.Fatalf("top monitor should use multi-line format:\n%s", out)
+	}
+}
+
+func TestModel_FormScreenShowsFooterMonitor(t *testing.T) {
 	m := newTestModel()
 	m.screen = ScreenForm
 	m.formKind = FormFeatureBrief
@@ -182,7 +271,7 @@ func TestModel_FormScreenShowsMonitor(t *testing.T) {
 
 	out := m.View()
 	if !strings.Contains(out, "Monitor") {
-		t.Fatalf("form view missing monitor strip: %s", out)
+		t.Fatalf("form view missing footer monitor: %s", out)
 	}
 	if !strings.Contains(out, "Describe: auth") {
 		t.Fatalf("form view missing form title: %s", out)

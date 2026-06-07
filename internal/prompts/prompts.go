@@ -46,6 +46,17 @@ Reference:
 %s`, truncate(specRef, 4000)))
 }
 
+// DesignSystem builds the system prompt for tsll design.
+func DesignSystem(projectRoot string) string {
+	designRef := LoadReference(projectRoot, "design.md")
+	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local. Define HOW to build the feature in design.md format.
+Include Architecture Overview (mermaid when helpful), Code Reuse Analysis, Components, Data Models if applicable,
+Error Handling Strategy, and Tech Decisions. Reuse existing codebase patterns. Never fabricate APIs or behaviors.
+
+Reference:
+%s`, truncate(designRef, 4000)))
+}
+
 // TasksSystem builds the system prompt for tsll tasks.
 func TasksSystem(projectRoot string) string {
 	tasksRef := LoadReference(projectRoot, "tasks.md")
@@ -55,6 +66,22 @@ Include Execution Plan phases and Requirement Traceability.
 
 Reference:
 %s`, truncate(tasksRef, 4000)))
+}
+
+// ImplementSystem builds the system prompt for full-feature implementation.
+func ImplementSystem(projectRoot string) string {
+	implRef := LoadReference(projectRoot, "implement.md")
+	principles := LoadReference(projectRoot, "coding-principles.md")
+	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a complete feature from its specification.
+Follow tlc-spec-driven execute conventions: state assumptions, list files to touch, implement surgically,
+verify with gate checks, one atomic step at a time. If tasks.md is missing, list an execution plan first.
+Never fabricate APIs or behaviors. Match existing code style.
+
+Coding principles:
+%s
+
+Reference:
+%s`, truncate(principles, 2000), truncate(implRef, 4000)))
 }
 
 // RunSystem builds the system prompt for tsll run task execution.

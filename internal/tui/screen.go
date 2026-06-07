@@ -27,6 +27,8 @@ type ActionKind int
 const (
 	ActionNone ActionKind = iota
 	ActionSpecify
+	ActionDesign
 	ActionTasks
+	ActionImplement
 	ActionRun
 )

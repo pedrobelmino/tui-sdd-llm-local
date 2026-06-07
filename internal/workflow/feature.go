@@ -10,6 +10,7 @@ import (
 
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/config"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/ollama"
+	"github.com/pedrobelmino/tui-sdd-llm-local/internal/project"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/prompts"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/state"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/templates"
@@ -75,6 +76,49 @@ func (s *Service) Specify(ctx context.Context, projectRoot, feature, brief strin
 	return usage, nil
 }
 
+// Design generates design.md from spec.md.
+func (s *Service) Design(ctx context.Context, projectRoot, feature string, onChunk func(string)) (ollama.TokenUsage, error) {
+	if !s.Reachable(ctx) {
+		return ollama.TokenUsage{}, fmt.Errorf("ollama not reachable at %s", s.cfg.OllamaHost)
+	}
+
+	featureDir := filepath.Join(projectRoot, ".specs/features", feature)
+	specPath := filepath.Join(featureDir, "spec.md")
+	specData, err := os.ReadFile(specPath)
+	if err != nil {
+		return ollama.TokenUsage{}, fmt.Errorf("read spec.md: %w (run specify first)", err)
+	}
+
+	user := fmt.Sprintf("Feature: %s\n\nspec.md:\n%s\n\nGenerate complete design.md now.", feature, string(specData))
+	if contextData, err := os.ReadFile(filepath.Join(featureDir, "context.md")); err == nil {
+		user += "\n\ncontext.md:\n" + string(contextData)
+	}
+	if concernsData, err := os.ReadFile(filepath.Join(projectRoot, ".specs/codebase/CONCERNS.md")); err == nil {
+		user += "\n\nCONCERNS.md:\n" + truncate(string(concernsData), 4000)
+	}
+
+	system := prompts.DesignSystem(projectRoot)
+	out, usage, err := s.client.ChatStream(ctx, ollama.ChatRequest{
+		Model: s.cfg.Model,
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
+		},
+	}, onChunk)
+	if err != nil {
+		return usage, err
+	}
+
+	designPath := filepath.Join(featureDir, "design.md")
+	if err := os.WriteFile(designPath, []byte(templates.Design(feature, out)), 0o644); err != nil {
+		return usage, err
+	}
+
+	statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
+	_ = state.UpdateCurrentWork(statePath, feature+" — design generated")
+	return usage, nil
+}
+
 // Tasks generates tasks.md from spec.md.
 func (s *Service) Tasks(ctx context.Context, projectRoot, feature string, onChunk func(string)) (ollama.TokenUsage, error) {
 	if !s.Reachable(ctx) {
@@ -108,6 +152,80 @@ func (s *Service) Tasks(ctx context.Context, projectRoot, feature string, onChun
 
 	statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
 	_ = state.UpdateCurrentWork(statePath, feature+" — tasks generated")
+	return usage, nil
+}
+
+// Implement executes all pending tasks or, without tasks.md, implements the feature from spec.md.
+func (s *Service) Implement(ctx context.Context, projectRoot, feature string, onChunk func(string)) (ollama.TokenUsage, error) {
+	if !s.Reachable(ctx) {
+		return ollama.TokenUsage{}, fmt.Errorf("ollama not reachable at %s", s.cfg.OllamaHost)
+	}
+
+	featureDir := filepath.Join(projectRoot, ".specs/features", feature)
+	specPath := filepath.Join(featureDir, "spec.md")
+	specData, err := os.ReadFile(specPath)
+	if err != nil {
+		return ollama.TokenUsage{}, fmt.Errorf("read spec.md: %w (run specify first)", err)
+	}
+
+	tasksPath := filepath.Join(featureDir, "tasks.md")
+	if tasksData, err := os.ReadFile(tasksPath); err == nil {
+		tasks := project.ParseTasksContent(string(tasksData))
+		if len(tasks) > 0 {
+			var total ollama.TokenUsage
+			var ran bool
+			for _, task := range tasks {
+				if task.Status == "Done" {
+					continue
+				}
+				ran = true
+				if onChunk != nil {
+					onChunk(fmt.Sprintf("\n\n--- Implementing %s: %s ---\n\n", task.ID, task.Title))
+				}
+				usage, err := s.Run(ctx, projectRoot, feature, task.ID, onChunk)
+				total.PromptTokens += usage.PromptTokens
+				total.CompletionTokens += usage.CompletionTokens
+				if err != nil {
+					return total, err
+				}
+			}
+			if !ran {
+				return total, fmt.Errorf("feature already fully implemented")
+			}
+			statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
+			_ = state.UpdateCurrentWork(statePath, feature+" — implemented")
+			return total, nil
+		}
+	}
+
+	user := fmt.Sprintf("Feature: %s\n\nspec.md:\n%s\n\nImplement the complete feature now.", feature, string(specData))
+	if designData, err := os.ReadFile(filepath.Join(featureDir, "design.md")); err == nil {
+		user += "\n\ndesign.md:\n" + string(designData)
+	}
+	if tasksData, err := os.ReadFile(tasksPath); err == nil {
+		user += "\n\ntasks.md:\n" + string(tasksData)
+	}
+
+	system := prompts.ImplementSystem(projectRoot)
+	out, usage, err := s.client.ChatStream(ctx, ollama.ChatRequest{
+		Model: s.cfg.Model,
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
+		},
+	}, onChunk)
+	if err != nil {
+		return usage, err
+	}
+
+	if err := os.WriteFile(filepath.Join(featureDir, "implement.done"), []byte(out), 0o644); err != nil {
+		return usage, err
+	}
+
+	statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
+	_ = state.UpdateCurrentWork(statePath, feature+" — implemented")
+	_ = state.AppendDecision(statePath, "Feature "+feature+" implemented",
+		"Completed via tsll implement", truncate(out, 200))
 	return usage, nil
 }
 

@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	monitorPanelLines = 5
-	pageHeaderLines   = 2
-	pageFooterLines   = 2
+	topMonitorPanelLines    = 5
+	footerMonitorPanelLines = 3
+	pageHeaderLines         = 2
+	pageFooterLines         = 2
 )
 
 func (m RootModel) activeTabIndex() int {
@@ -21,8 +22,27 @@ func (m RootModel) activeTabIndex() int {
 	return int(m.activeView) - 1
 }
 
+func (m RootModel) isFeaturesContext() bool {
+	switch m.screen {
+	case ScreenFeatureDetail, ScreenAction:
+		return true
+	case ScreenForm:
+		return m.formKind == FormNewFeatureName || m.formKind == FormFeatureBrief
+	case ScreenDashboard:
+		return m.activeView == ViewFeatures
+	}
+	return false
+}
+
+func (m RootModel) monitorPanelLines() int {
+	if m.isFeaturesContext() {
+		return footerMonitorPanelLines
+	}
+	return topMonitorPanelLines
+}
+
 func (m RootModel) pageOverheadLines(w, h int) int {
-	n := pageHeaderLines + monitorPanelLines + pageFooterLines
+	n := pageHeaderLines + m.monitorPanelLines() + pageFooterLines
 	if w < minWidth || h < minHeight {
 		n++
 	}
@@ -58,10 +78,20 @@ func (m RootModel) composePage(main, footer string, w, h int) string {
 		parts = append(parts, banner)
 	}
 
-	parts = append(parts, views.RenderMonitorStrip(views.MonitorData{
-		Width: w, Ollama: m.ollama, GPU: m.gpu, Tokens: m.tokens,
-	}))
+	if !m.isFeaturesContext() {
+		parts = append(parts, views.RenderMonitorStrip(views.MonitorData{
+			Width: w, Ollama: m.ollama, GPU: m.gpu, Tokens: m.tokens,
+		}))
+	}
+
 	parts = append(parts, main)
+
+	if m.isFeaturesContext() {
+		parts = append(parts, views.RenderMonitorFooter(views.FooterMonitorData{
+			Width: w, Ollama: m.ollama, GPU: m.gpu, Tokens: m.tokens, System: m.system,
+		}))
+	}
+
 	parts = append(parts, ui.Footer(footer, w))
 
 	return strings.Join(parts, "\n")

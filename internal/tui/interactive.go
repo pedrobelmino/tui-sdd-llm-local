@@ -54,10 +54,20 @@ func (m RootModel) handleFeaturesKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 			m.pendingFeature = m.sortedFeatureName()
 			m = m.openFormWithReturn(FormFeatureBrief, ScreenDashboard)
 		}
+	case key.Matches(msg, m.keymap.GenDesign):
+		if len(m.features) > 0 {
+			name := m.sortedFeatureName()
+			return m.startAction(ActionDesign, name, "", "")
+		}
 	case key.Matches(msg, m.keymap.GenTasks):
 		if len(m.features) > 0 {
 			name := m.sortedFeatureName()
 			return m.startAction(ActionTasks, name, "", "")
+		}
+	case key.Matches(msg, m.keymap.Implement):
+		if len(m.features) > 0 {
+			name := m.sortedFeatureName()
+			return m.startAction(ActionImplement, name, "", "")
 		}
 	}
 	return m, nil
@@ -79,8 +89,12 @@ func (m RootModel) handleDetailKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 	case key.Matches(msg, m.keymap.Specify):
 		m.pendingFeature = m.selectedFeature
 		m = m.openFormWithReturn(FormFeatureBrief, ScreenFeatureDetail)
+	case key.Matches(msg, m.keymap.GenDesign):
+		return m.startAction(ActionDesign, m.selectedFeature, "", "")
 	case key.Matches(msg, m.keymap.GenTasks):
 		return m.startAction(ActionTasks, m.selectedFeature, "", "")
+	case key.Matches(msg, m.keymap.ImplementAll):
+		return m.startAction(ActionImplement, m.selectedFeature, "", "")
 	case key.Matches(msg, m.keymap.RunTask), key.Matches(msg, m.keymap.Open):
 		if len(m.featureTasks) > 0 {
 			id := m.featureTasks[m.taskCursor].ID
@@ -323,8 +337,12 @@ func runWorkflow(kind ActionKind, root, feature, brief, taskID string, ch chan<-
 	switch kind {
 	case ActionSpecify:
 		usage, err = svc.Specify(ctx, root, feature, brief, onChunk)
+	case ActionDesign:
+		usage, err = svc.Design(ctx, root, feature, onChunk)
 	case ActionTasks:
 		usage, err = svc.Tasks(ctx, root, feature, onChunk)
+	case ActionImplement:
+		usage, err = svc.Implement(ctx, root, feature, onChunk)
 	case ActionRun:
 		usage, err = svc.Run(ctx, root, feature, taskID, onChunk)
 	}
@@ -370,8 +388,12 @@ func (m RootModel) renderAction(width, height int) string {
 	switch m.actionKind {
 	case ActionSpecify:
 		title = "Generating spec: " + m.pendingFeature
+	case ActionDesign:
+		title = "Generating design: " + m.selectedFeature
 	case ActionTasks:
 		title = "Generating tasks: " + m.selectedFeature
+	case ActionImplement:
+		title = "Implementing: " + m.selectedFeature
 	case ActionRun:
 		title = fmt.Sprintf("Running %s on %s", m.actionTaskID, m.selectedFeature)
 	}

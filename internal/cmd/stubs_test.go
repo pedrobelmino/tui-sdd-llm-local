@@ -66,6 +66,26 @@ func TestTasks_RequiresProject(t *testing.T) {
 	}
 }
 
+func TestImplement_RequiresProject(t *testing.T) {
+	chdirTemp(t)
+
+	resetRootArgs("implement", "myfeature")
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "tsll init") {
+		t.Fatalf("expected project error, got %v", err)
+	}
+}
+
+func TestDesign_RequiresProject(t *testing.T) {
+	chdirTemp(t)
+
+	resetRootArgs("design", "myfeature")
+	err := rootCmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "tsll init") {
+		t.Fatalf("expected project error, got %v", err)
+	}
+}
+
 func TestRun_RequiresProject(t *testing.T) {
 	chdirTemp(t)
 

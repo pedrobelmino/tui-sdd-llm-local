@@ -147,7 +147,9 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if key.Matches(msg, m.keymap.NewFeature) ||
 					key.Matches(msg, m.keymap.Open) ||
 					key.Matches(msg, m.keymap.Specify) ||
+					key.Matches(msg, m.keymap.GenDesign) ||
 					key.Matches(msg, m.keymap.GenTasks) ||
+					key.Matches(msg, m.keymap.Implement) ||
 					key.Matches(msg, m.keymap.Up) ||
 					key.Matches(msg, m.keymap.Down) ||
 					msg.String() == "j" || msg.String() == "k" {
@@ -290,7 +292,7 @@ func (m RootModel) View() string {
 		footer = "j/k: scroll │ g/G: top/bottom │ esc: back"
 	case ScreenFeatureDetail:
 		main = m.renderFeatureDetailBody(w, mainH)
-		footer = "esc: back │ e: run task │ s/t: evolve spec/tasks"
+		footer = "esc: back │ e: run task │ a: impl all │ s/d/t: spec/design/tasks"
 	default:
 		main = m.renderBody(w, h)
 		footer = FooterBindings()

@@ -119,3 +119,12 @@ func Tasks(body string) string {
 	}
 	return "# Tasks\n\n**Status**: Approved\n\n" + body
 }
+
+// Design wraps LLM architecture output.
+func Design(featureName, body string) string {
+	if strings.HasPrefix(strings.TrimSpace(body), "# ") {
+		return body
+	}
+	return fmt.Sprintf("# %s Design\n\n**Spec**: `.specs/features/%s/spec.md`\n**Status**: Draft\n\n---\n\n%s\n",
+		featureName, featureName, body)
+}

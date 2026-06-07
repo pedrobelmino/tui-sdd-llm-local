@@ -23,8 +23,11 @@ type KeyMap struct {
 	NewFeature key.Binding
 	Open       key.Binding
 	Specify    key.Binding
+	GenDesign  key.Binding
 	GenTasks   key.Binding
-	RunTask    key.Binding
+	Implement    key.Binding
+	ImplementAll key.Binding
+	RunTask      key.Binding
 	Back       key.Binding
 	Submit     key.Binding
 }
@@ -47,8 +50,11 @@ func DefaultKeyMap() KeyMap {
 		NewFeature: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new feature")),
 		Open: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Specify: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "specify")),
+		GenDesign: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "design")),
 		GenTasks: key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tasks")),
-		RunTask: key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "run task")),
+		Implement:    key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "implement")),
+		ImplementAll: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "implement all")),
+		RunTask:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "run task")),
 		Back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		Submit: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
 	}
@@ -61,7 +67,7 @@ func FooterBindings() string {
 
 // FeaturesFooter returns footer when on features view.
 func FeaturesFooter() string {
-	return "n:new │ enter:open │ s:spec │ t:tasks │ j/k:nav │ esc/back: —"
+	return "n:new │ enter:open │ s:spec │ d:design │ t:tasks │ e:impl │ j/k:nav"
 }
 
 // HelpOverlay returns full help text.
@@ -82,13 +88,17 @@ func HelpOverlay() string {
 		"  n            new feature (name + brief → spec)",
 		"  j / k        move selection",
 		"  enter        open feature detail",
-		"  s            specify selected feature",
-		"  t            generate tasks.md",
+		"  s            specify (spec.md)",
+		"  d            design (design.md, needs spec)",
+		"  t            tasks (tasks.md, needs spec)",
+		"  e            implement feature (needs spec)",
 		"",
 		"  Feature detail",
 		"  j / k        select task",
-		"  e / enter    run task with Ollama",
+		"  e / enter    run selected task (needs tasks)",
+		"  a            implement all pending tasks (needs spec)",
 		"  s            regenerate spec",
+		"  d            regenerate design",
 		"  t            regenerate tasks",
 		"  esc          back to features list",
 		"",

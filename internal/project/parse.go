@@ -9,10 +9,11 @@ import (
 
 // FeatureEntry describes a feature directory under .specs/features/.
 type FeatureEntry struct {
-	Name      string
-	HasSpec   bool
-	HasTasks  bool
-	HasDesign bool
+	Name          string
+	HasSpec       bool
+	HasDesign     bool
+	HasTasks      bool
+	HasImplement  bool
 }
 
 const (
@@ -47,7 +48,7 @@ func parseMetadataLine(path, prefix string) string {
 	return ""
 }
 
-// ListFeatures scans .specs/features/ and reports spec/tasks/design presence.
+// ListFeatures scans .specs/features/ and reports spec/design/tasks/implement status.
 func ListFeatures(projectRoot string) ([]FeatureEntry, error) {
 	featuresDir := filepath.Join(projectRoot, ".specs/features")
 	entries, err := os.ReadDir(featuresDir)
@@ -67,10 +68,11 @@ func ListFeatures(projectRoot string) ([]FeatureEntry, error) {
 		name := entry.Name()
 		featureDir := filepath.Join(featuresDir, name)
 		feature := FeatureEntry{
-			Name:      name,
-			HasSpec:   fileExists(filepath.Join(featureDir, "spec.md")),
-			HasTasks:  fileExists(filepath.Join(featureDir, "tasks.md")),
-			HasDesign: fileExists(filepath.Join(featureDir, "design.md")),
+			Name:         name,
+			HasSpec:      fileExists(filepath.Join(featureDir, "spec.md")),
+			HasDesign:    fileExists(filepath.Join(featureDir, "design.md")),
+			HasTasks:     fileExists(filepath.Join(featureDir, "tasks.md")),
+			HasImplement: featureImplemented(featureDir),
 		}
 		features = append(features, feature)
 	}
@@ -81,4 +83,13 @@ func ListFeatures(projectRoot string) ([]FeatureEntry, error) {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func featureImplemented(featureDir string) bool {
+	tasksPath := filepath.Join(featureDir, "tasks.md")
+	if tasks, err := ParseTasks(tasksPath); err == nil && len(tasks) > 0 {
+		done, total := TaskProgress(tasks)
+		return done == total
+	}
+	return fileExists(filepath.Join(featureDir, "implement.done"))
 }

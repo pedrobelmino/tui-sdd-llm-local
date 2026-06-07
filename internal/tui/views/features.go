@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	featuresPanelWidth = 56
+	featuresPanelWidth = 68
 	featuresEmptyMsg   = "No features yet — press n to create"
 )
 
@@ -32,7 +32,7 @@ func RenderFeatures(d FeaturesData) string {
 	}
 
 	panel := ui.Panel("Features", content, featuresPanelWidth, panelH)
-	help := padLines(ui.Panel("Shortcuts", "n:new  enter:open  s:spec  t:tasks  j/k:move", featuresPanelWidth, 4), 3)
+	help := padLines(ui.Panel("Shortcuts", "n:new  s:spec  d:design  t:tasks  e:impl  j/k:move", featuresPanelWidth, 4), 3)
 	return padLines(panel, 3) + "\n" + help
 }
 
@@ -47,18 +47,19 @@ func featuresContent(features []project.FeatureEntry, cursor int) string {
 	})
 
 	var lines []string
-	lines = append(lines, "    NAME            SPEC  TASKS DESIGN")
+	lines = append(lines, "  NAME            SPEC DSGN TASK IMPL")
 	for i, f := range sorted {
-		prefix := "    "
+		prefix := "  "
 		if i == cursor {
-			prefix = "  > "
+			prefix = "> "
 		}
-		lines = append(lines, fmt.Sprintf("%s%-15s %s     %s     %s",
+		lines = append(lines, fmt.Sprintf("%s%-15s  %s    %s    %s    %s",
 			prefix,
 			f.Name,
 			featureBadge(f.HasSpec),
-			featureBadge(f.HasTasks),
 			featureBadge(f.HasDesign),
+			featureBadge(f.HasTasks),
+			featureBadge(f.HasImplement),
 		))
 	}
 	return strings.Join(lines, "\n")
