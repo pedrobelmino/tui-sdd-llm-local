@@ -94,11 +94,11 @@ func Definitions() []ollama.ToolDef {
 			Type: "function",
 			Function: ollama.ToolFunction{
 				Name:        "list_dir",
-				Description: "List files and directories inside a directory (non-recursive).",
+				Description: "List all files and directories (including hidden ones that start with '.') inside a directory. Call repeatedly to explore subdirectories. Use \".\" for the project root, \".specs/features/NAME\" to inspect a feature folder, etc.",
 				Parameters: ollama.ToolParameters{
 					Type: "object",
 					Properties: map[string]ollama.ToolPropertySchema{
-						"path": {Type: "string", Description: "Directory path relative to the project root (use \".\" for root)"},
+						"path": {Type: "string", Description: "Directory path relative to the project root. Hidden directories like .specs/ are fully accessible."},
 					},
 					Required: []string{"path"},
 				},

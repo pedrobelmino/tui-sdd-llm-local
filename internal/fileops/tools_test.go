@@ -131,6 +131,38 @@ func TestListDir_ShowsEntries(t *testing.T) {
 	}
 }
 
+func TestListDir_ShowsHiddenFiles(t *testing.T) {
+	root := t.TempDir()
+	// Create hidden file and hidden directory
+	if err := os.WriteFile(filepath.Join(root, ".hidden-file"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".specs/features"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "visible.go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec := Executor(root)
+
+	result := exec("list_dir", map[string]any{"path": "."})
+	if !strings.Contains(result, ".hidden-file") {
+		t.Errorf("list_dir did not show hidden file; result = %q", result)
+	}
+	if !strings.Contains(result, ".specs/") {
+		t.Errorf("list_dir did not show hidden dir .specs/; result = %q", result)
+	}
+	if !strings.Contains(result, "visible.go") {
+		t.Errorf("list_dir did not show visible file; result = %q", result)
+	}
+
+	// Navigating into hidden directory also works
+	result2 := exec("list_dir", map[string]any{"path": ".specs"})
+	if !strings.Contains(result2, "features/") {
+		t.Errorf("list_dir .specs did not show features/; result = %q", result2)
+	}
+}
+
 func TestUnknownTool_ReturnsError(t *testing.T) {
 	exec := Executor(t.TempDir())
 	result := exec("fly_to_moon", map[string]any{})
