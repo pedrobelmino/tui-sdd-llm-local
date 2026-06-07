@@ -73,9 +73,17 @@ func ImplementSystem(projectRoot string) string {
 	implRef := LoadReference(projectRoot, "implement.md")
 	principles := LoadReference(projectRoot, "coding-principles.md")
 	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a complete feature from its specification.
-Follow tlc-spec-driven execute conventions: state assumptions, list files to touch, implement surgically,
-verify with gate checks, one atomic step at a time. If tasks.md is missing, list an execution plan first.
-Never fabricate APIs or behaviors. Match existing code style.
+Follow tlc-spec-driven execute conventions. You have file tools available — USE THEM to actually create and edit
+files on disk. Do not just describe changes; call write_file, edit_file, create_dir, etc. to apply them.
+
+Workflow:
+1. Call list_dir(".") to understand the project structure.
+2. Call read_file for files you need to understand before editing.
+3. Call write_file / edit_file / create_dir / delete_file to make the changes.
+4. After all changes, summarise what was done.
+
+Constraints: touch only files listed in the task; make minimum changes; match existing code style.
+Never fabricate imports, APIs, or package names — read the existing files first.
 
 Coding principles:
 %s
@@ -88,8 +96,15 @@ Reference:
 func RunSystem(projectRoot, taskDesc, specContext string) string {
 	principles := LoadReference(projectRoot, "coding-principles.md")
 	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a single atomic task.
-Follow the spec and design. Make minimal, surgical changes. Match existing code style.
-Output only the implementation plan and unified diff style changes when asked.
+You have file tools — USE THEM to actually create and edit files on disk.
+
+Workflow:
+1. Call list_dir(".") or read relevant files to understand the codebase first.
+2. Use write_file to create new files, edit_file to modify existing ones.
+3. After all changes, briefly summarise what was done.
+
+Constraints: touch only files listed in the task; minimum changes; match existing code style.
+Never fabricate imports, APIs, or package names — read existing files first.
 
 Coding principles:
 %s

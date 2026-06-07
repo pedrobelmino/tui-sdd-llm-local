@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/config"
+	"github.com/pedrobelmino/tui-sdd-llm-local/internal/fileops"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/ollama"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/project"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/prompts"
@@ -19,7 +20,7 @@ import (
 // Service runs tsll feature workflows (specify, tasks, run).
 type Service struct {
 	cfg    config.Config
-	client ollama.GenerateClient
+	client ollama.GenerateClientWithTools
 }
 
 // New creates a workflow service with config defaults.
@@ -27,7 +28,7 @@ func New() *Service {
 	cfg := config.Load()
 	return &Service{
 		cfg:    cfg,
-		client: ollama.NewGenerateClient(cfg.OllamaHost),
+		client: ollama.NewGenerateClient(cfg.OllamaHost).(ollama.GenerateClientWithTools),
 	}
 }
 
@@ -229,7 +230,8 @@ func (s *Service) Implement(ctx context.Context, projectRoot, feature string, on
 	return usage, nil
 }
 
-// Run executes a single task with the local model.
+// Run executes a single task with the local model, using file-operation tools
+// so the model can create/edit/delete files directly on disk.
 func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, onChunk func(string)) (ollama.TokenUsage, error) {
 	if !s.Reachable(ctx) {
 		return ollama.TokenUsage{}, fmt.Errorf("ollama not reachable at %s", s.cfg.OllamaHost)
@@ -251,15 +253,20 @@ func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, 
 	}
 
 	system := prompts.RunSystem(projectRoot, block, string(specData))
-	user := fmt.Sprintf("Implement task %s now. List files to change and provide code changes.", taskID)
+	user := fmt.Sprintf("Implement task %s now. Use the file tools to create, read, and edit files as needed.", taskID)
 
-	out, usage, err := s.client.ChatStream(ctx, ollama.ChatRequest{
-		Model: s.cfg.Model,
-		Messages: []ollama.ChatMessage{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
-		},
-	}, onChunk)
+	msgs := []ollama.ChatMessageWithTools{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}
+
+	toolCtx := ollama.WithModel(ctx, s.cfg.Model)
+	out, usage, err := s.client.ChatWithTools(
+		toolCtx, msgs,
+		fileops.Definitions(),
+		fileops.Executor(projectRoot),
+		onChunk,
+	)
 	if err != nil {
 		return usage, err
 	}
