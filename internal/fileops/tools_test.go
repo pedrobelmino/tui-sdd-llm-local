@@ -70,6 +70,21 @@ func TestReadFile_DirectoryReturnsError(t *testing.T) {
 	}
 }
 
+func TestWriteFile_BlocksSpecsPath(t *testing.T) {
+	root := t.TempDir()
+	exec := Executor(root)
+	result := exec("write_file", map[string]any{
+		"path":    ".specs/features/FEAT-01.md",
+		"content": "should not be written",
+	})
+	if !strings.HasPrefix(result, "ERROR") {
+		t.Fatalf("expected specs write blocked, got: %s", result)
+	}
+	if !strings.Contains(result, "tasks.md") {
+		t.Fatalf("expected helpful hint about tasks.md: %s", result)
+	}
+}
+
 func TestWriteFile_RejectsTruncatedGo(t *testing.T) {
 	root := t.TempDir()
 	exec := Executor(root)

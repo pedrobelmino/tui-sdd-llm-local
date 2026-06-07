@@ -139,12 +139,23 @@ func execute(projectRoot, toolName string, args map[string]any) (string, error) 
 
 // --- individual tool implementations ---
 
+func isSpecsMutationBlocked(rel string) error {
+	clean := filepath.ToSlash(filepath.Clean(rel))
+	if clean == ".specs" || strings.HasPrefix(clean, ".specs/") {
+		return fmt.Errorf("cannot modify %s — .specs/ is managed by tsll (specify/design/tasks/implement). Task status is updated automatically in .specs/features/<feature-slug>/tasks.md", rel)
+	}
+	return nil
+}
+
 func writeFile(root string, args map[string]any) (string, error) {
 	path, content, err := requirePathAndString(root, args, "content")
 	if err != nil {
 		return "", err
 	}
 	rel, _ := filepath.Rel(root, path)
+	if err := isSpecsMutationBlocked(rel); err != nil {
+		return "", err
+	}
 	if err := validateWriteContent(rel, content); err != nil {
 		return "", err
 	}
@@ -217,6 +228,10 @@ func editFile(root string, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	rel, _ := filepath.Rel(root, path)
+	if err := isSpecsMutationBlocked(rel); err != nil {
+		return "", err
+	}
 	oldContent, ok := stringArg(args, "old_content")
 	if !ok {
 		return "", fmt.Errorf("old_content required")
@@ -241,7 +256,6 @@ func editFile(root string, args map[string]any) (string, error) {
 	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 		return "", fmt.Errorf("write: %w", err)
 	}
-	rel, _ := filepath.Rel(root, path)
 	return fmt.Sprintf("edited %s", rel), nil
 }
 
@@ -250,10 +264,13 @@ func deleteFile(root string, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	rel, _ := filepath.Rel(root, path)
+	if err := isSpecsMutationBlocked(rel); err != nil {
+		return "", err
+	}
 	if err := os.Remove(path); err != nil {
 		return "", fmt.Errorf("delete: %w", err)
 	}
-	rel, _ := filepath.Rel(root, path)
 	return fmt.Sprintf("deleted %s", rel), nil
 }
 
@@ -262,10 +279,13 @@ func createDir(root string, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	rel, _ := filepath.Rel(root, path)
+	if err := isSpecsMutationBlocked(rel); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
-	rel, _ := filepath.Rel(root, path)
 	return fmt.Sprintf("created dir %s", rel), nil
 }
 

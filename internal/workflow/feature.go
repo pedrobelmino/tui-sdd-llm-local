@@ -50,12 +50,54 @@ func (s *Service) Reachable(ctx context.Context) bool {
 func (s *Service) Model() string { return s.cfg.Model }
 
 func (s *Service) toolCtx(ctx context.Context) context.Context {
-	ctx = ollama.WithModel(ctx, s.cfg.Model)
-	if s.cfg.FastMode {
-		// Lower loop cap in fast mode to reduce tail latency on bad loops.
-		ctx = ollama.WithToolLoopLimit(ctx, 16)
+	return ollama.WithModel(ctx, s.cfg.Model)
+}
+
+// implementToolCtx sets the default tool-calling loop budget for implement without a task block.
+func (s *Service) implementToolCtx(ctx context.Context) context.Context {
+	return ollama.WithToolLoopLimit(s.toolCtx(ctx), estimateTaskLoopLimit("", s.cfg.FastMode))
+}
+
+// implementTaskCtx sets loop budget from the task description (scaffolding needs more turns).
+func (s *Service) implementTaskCtx(ctx context.Context, taskBlock string) context.Context {
+	return ollama.WithToolLoopLimit(s.toolCtx(ctx), estimateTaskLoopLimit(taskBlock, s.cfg.FastMode))
+}
+
+// estimateTaskLoopLimit sizes the tool loop for how many files a task likely needs.
+func estimateTaskLoopLimit(taskBlock string, fastMode bool) int {
+	scope := classifyTaskScope(taskBlock)
+	switch scope {
+	case ScopeScaffold:
+		limit := 60
+		if !fastMode {
+			limit = 80
+		}
+		lower := strings.ToLower(taskBlock)
+		for _, kw := range []string{"workflow", "ci/cd", ".github", "docker"} {
+			if strings.Contains(lower, kw) {
+				limit += 8
+			}
+		}
+		if limit > 100 {
+			limit = 100
+		}
+		return limit
+	case ScopeFocused:
+		if fastMode {
+			return 20
+		}
+		return 28
+	case ScopeSection:
+		if fastMode {
+			return 22
+		}
+		return 28
+	default:
+		if fastMode {
+			return 30
+		}
+		return 36
 	}
-	return ctx
 }
 
 func (s *Service) warmModel(ctx context.Context) {
@@ -221,42 +263,55 @@ func (s *Service) Implement(ctx context.Context, projectRoot, feature string, on
 	if s.cfg.FastMode && onChunk != nil {
 		onChunk("⚡ fast mode enabled (compact context)\n")
 	}
+	logContextSummary(fc, onChunk)
 	s.warmModel(ctx)
 
-	// If tasks exist, execute pending code tasks one-by-one with shared cached context.
-	tasks := project.ImplementableTasks(project.ParseTasksContent(fc.Tasks))
-	if len(tasks) > 0 {
+	tasksPath := filepath.Join(fc.FeatureDir, "tasks.md")
+	allTasks := project.ParseTasksContent(fc.Tasks)
+	codeTasks := project.CodeTasks(allTasks)
+	if len(codeTasks) > 0 {
 		var total ollama.TokenUsage
-		var ran bool
-		for _, task := range tasks {
-			ran = true
+		for {
+			// Re-read tasks.md each iteration so done marks persist and re-runs resume correctly.
+			fresh, loadErr := s.loadFeatureContext(projectRoot, feature)
+			if loadErr != nil {
+				return total, loadErr
+			}
+			pending := project.ImplementableTasks(project.ParseTasksContent(fresh.Tasks))
+			if len(pending) == 0 {
+				if onChunk != nil {
+					onChunk("\n✓ all code tasks already done — nothing left to implement\n")
+				}
+				statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
+				_ = state.UpdateCurrentWork(statePath, feature+" — implemented")
+				return total, nil
+			}
+			task := pending[0]
 			if onChunk != nil {
 				onChunk(fmt.Sprintf("\n\n--- Implementing %s: %s ---\n\n", task.ID, task.Title))
 			}
-			usage, runErr := s.runTaskWithContext(ctx, projectRoot, fc, task.ID, onChunk)
+			usage, runErr := s.runTaskWithContext(ctx, projectRoot, fresh, task.ID, onChunk)
 			total.PromptTokens += usage.PromptTokens
 			total.CompletionTokens += usage.CompletionTokens
 			if runErr != nil {
+				_ = project.UpdateTaskStatus(tasksPath, task.ID, "Pending")
 				return total, runErr
 			}
 		}
-		if !ran {
-			return total, fmt.Errorf("feature already fully implemented")
-		}
-		statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
-		_ = state.UpdateCurrentWork(statePath, feature+" — implemented")
-		return total, nil
 	}
 
-	user := buildImplementUserMsg(fc, "", s.cfg.FastMode)
+	user := buildImplementUserMsg(projectRoot, fc, "", s.cfg.FastMode)
 	system := prompts.ImplementSystem(projectRoot)
 	msgs := []ollama.ChatMessageWithTools{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}
 
+	runCtx := ollama.WithMinFileWrites(s.implementToolCtx(ctx), 3)
+	runCtx = ollama.WithTaskPlanMode(runCtx, true)
+	runCtx = ollama.WithSingleTouch(runCtx, true)
 	out, usage, err := s.client.ChatWithTools(
-		s.toolCtx(ctx), msgs,
+		runCtx, msgs,
 		fileops.Definitions(),
 		fileops.Executor(projectRoot),
 		onChunk,
@@ -290,6 +345,7 @@ func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, 
 	if err != nil {
 		return ollama.TokenUsage{}, err
 	}
+	logContextSummary(fc, onChunk)
 	return s.runTaskWithContext(ctx, projectRoot, fc, taskID, onChunk)
 }
 
@@ -299,26 +355,46 @@ func (s *Service) runTaskWithContext(ctx context.Context, projectRoot string, fc
 		return ollama.TokenUsage{}, fmt.Errorf("task %s not found", taskID)
 	}
 
+	tasksPath := filepath.Join(fc.FeatureDir, "tasks.md")
+	_ = project.UpdateTaskStatus(tasksPath, taskID, "In Progress")
+
 	system := prompts.RunSystem(projectRoot, block, fc.Spec)
-	user := buildImplementUserMsg(fc, block, s.cfg.FastMode)
+	scope := classifyTaskScope(block)
+	user := buildImplementUserMsg(projectRoot, fc, block, s.cfg.FastMode)
 
 	msgs := []ollama.ChatMessageWithTools{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}
 
+	runCtx := ollama.WithMinFileWrites(s.implementTaskCtx(ctx, block), estimateMinFileWrites(block))
+	runCtx = ollama.WithTaskPlanMode(runCtx, true)
+	runCtx = ollama.WithSingleTouch(runCtx, true)
+	runCtx = ollama.WithMaxPlanFiles(runCtx, maxPlanFilesForScope(scope))
+	runCtx = ollama.WithFocusedAllowlist(runCtx, focusedAllowedFragments(block))
+	if onChunk != nil {
+		onChunk(fmt.Sprintf("📎 turn budget: %d · scope: %s · max %d files in plan\n",
+			estimateTaskLoopLimit(block, s.cfg.FastMode), scope, maxPlanFilesForScope(scope)))
+	}
 	out, usage, err := s.client.ChatWithTools(
-		ollama.WithMinFileWrites(s.toolCtx(ctx), estimateMinFileWrites(block)), msgs,
+		runCtx, msgs,
 		fileops.Definitions(),
 		fileops.Executor(projectRoot),
 		onChunk,
 	)
 	if err != nil {
+		_ = project.UpdateTaskStatus(tasksPath, taskID, "Pending")
 		return usage, err
 	}
 
-	tasksPath := filepath.Join(fc.FeatureDir, "tasks.md")
-	_ = state.UpdateTaskStatus(tasksPath, taskID, "✅ Done")
+	if err := project.UpdateTaskStatus(tasksPath, taskID, "✅ Done"); err != nil {
+		if onChunk != nil {
+			onChunk(fmt.Sprintf("⚠ could not update tasks.md for %s: %v\n", taskID, err))
+		}
+	} else if onChunk != nil {
+		rel, _ := filepath.Rel(projectRoot, tasksPath)
+		onChunk(fmt.Sprintf("✓ marked %s done in %s\n", taskID, rel))
+	}
 	statePath := filepath.Join(projectRoot, ".specs/project/STATE.md")
 	_ = state.UpdateCurrentWork(statePath, fc.Feature+" — "+taskID+" executed")
 	_ = state.AppendDecision(statePath, "Task "+taskID+" executed", truncate(out, 200), "tsll run from TUI/CLI")
@@ -373,7 +449,7 @@ func (s *Service) QuickTask(ctx context.Context, projectRoot, feature, request s
 	user := "Quick task request:\n" + request + "\n\nApply changes using file tools."
 	if strings.TrimSpace(feature) != "" {
 		if fc, err := s.loadFeatureContext(projectRoot, feature); err == nil {
-			user = buildImplementUserMsg(fc, "", s.cfg.FastMode) + "\n\n---\n" + user
+			user = buildImplementUserMsg(projectRoot, fc, "", s.cfg.FastMode) + "\n\n---\n" + user
 		}
 	}
 
@@ -416,11 +492,16 @@ func estimateMinFileWrites(taskBlock string) int {
 	if taskBlock == "" {
 		return 1
 	}
-	lower := strings.ToLower(taskBlock)
-	if strings.Contains(lower, "develop") || strings.Contains(lower, "implement") {
+	switch classifyTaskScope(taskBlock) {
+	case ScopeScaffold:
+		return 8
+	case ScopeFocused:
+		return 2
+	case ScopeSection:
+		return 3
+	default:
 		return 2
 	}
-	return 1
 }
 
 func loadProjectStack(projectRoot string) string {
@@ -477,14 +558,19 @@ func buildAskUserMsg(fc featureContext, question string, fastMode bool) string {
 	return b.String()
 }
 
-func buildImplementUserMsg(fc featureContext, taskBlock string, fastMode bool) string {
+func buildImplementUserMsg(projectRoot string, fc featureContext, taskBlock string, fastMode bool) string {
 	var b strings.Builder
 
-	b.WriteString("Feature: " + fc.Feature + "\n")
+	b.WriteString("Feature slug: " + fc.Feature + "\n")
 	b.WriteString("Feature spec directory: .specs/features/" + fc.Feature + "/\n")
+	b.WriteString("IMPORTANT: The feature slug is \"" + fc.Feature + "\" — NOT requirement IDs from spec.md (e.g. FEAT-01).\n")
+	b.WriteString("tsll updates .specs/features/" + fc.Feature + "/tasks.md automatically — NEVER write or edit anything under .specs/.\n")
 	if fc.ProjectStack != "" {
 		b.WriteString("\n## Project tech stack (AUTHORITATIVE — override conflicting design.md frameworks)\n\n")
 		b.WriteString(fc.ProjectStack + "\n")
+		if guard := stackLanguageGuard(fc.ProjectStack); guard != "" {
+			b.WriteString(guard + "\n")
+		}
 	}
 
 	// List the feature dir so the model knows what files exist there.
@@ -503,7 +589,18 @@ func buildImplementUserMsg(fc featureContext, taskBlock string, fastMode bool) s
 	}
 	b.WriteString("\n")
 
+	if tree := formatExistingSourceTree(projectRoot, 50); tree != "" {
+		b.WriteString(tree)
+		b.WriteString("\n")
+	} else if fc.ProjectStack != "" {
+		b.WriteString(GreenfieldPathHint(fc.ProjectStack))
+		b.WriteString("\n\n")
+	}
+
 	if taskBlock != "" {
+		scope := classifyTaskScope(taskBlock)
+		b.WriteString(scopeHint(taskBlock, scope))
+		b.WriteString("\n")
 		b.WriteString("## Task to implement (ONLY this task — follow spec.md + design.md)\n\n")
 		b.WriteString(taskBlock + "\n\n")
 	} else if pending := project.ImplementableTasks(project.ParseTasksContent(fc.Tasks)); len(pending) > 0 {
@@ -542,11 +639,16 @@ func buildImplementUserMsg(fc featureContext, taskBlock string, fastMode bool) s
 	b.WriteString("---\n")
 	b.WriteString("The spec files above are already in context. Use file tools ONLY for SOURCE CODE files (not spec/design/tasks).\n")
 	if taskBlock != "" {
-		b.WriteString("Implement ONLY the task above. Follow spec.md, design.md, and the project tech stack.\n")
-		b.WriteString("Create ALL files/components the task requires. Do NOT stop after one file.\n")
-		b.WriteString("Write a plain-text summary ONLY when this task is fully implemented.\n")
+		b.WriteString("Implement ONLY the task above — not other sections of the app. Follow spec.md, design.md, and the project tech stack.\n")
+		b.WriteString("## Per-task workflow (one touch per file)\n")
+		b.WriteString("1) FIRST response: <file_plan> with ONLY the paths this task needs (one per line).\n")
+		b.WriteString("   Derive the plan from this task's \"What/Where\" in tasks.md; add extra files ONLY if spec.md/design.md require them.\n")
+		b.WriteString("2) THEN write_file each path ONCE with complete final content — no edit_file, no second write to same path.\n")
+		b.WriteString("   Scaffold tasks only: optional <task_plan>{\"files\":[...]}</task_plan> one-shot.\n")
+		b.WriteString("3) Plain-text summary only when every planned file is written.\n")
 	} else {
 		b.WriteString("Implement the complete feature per spec.md, design.md, and tasks.md.\n")
+		b.WriteString("Build your <file_plan> from the tasks.md checklist above; add extra files ONLY when spec.md/design.md require them.\n")
 		b.WriteString("Create ALL required source files. Do NOT stop after one file or a JSON summary.\n")
 	}
 
@@ -565,6 +667,25 @@ func extractTaskBlock(tasks, taskID string) string {
 		}
 	}
 	return ""
+}
+
+// logContextSummary makes it explicit, in the run log, which spec documents are
+// being considered during implementation (and the authoritative stack).
+func logContextSummary(fc featureContext, onChunk func(string)) {
+	if onChunk == nil {
+		return
+	}
+	mark := func(name, content string) string {
+		if strings.TrimSpace(content) == "" {
+			return name + " (ausente)"
+		}
+		return fmt.Sprintf("%s (%d chars)", name, len(content))
+	}
+	onChunk(fmt.Sprintf("📚 contexto considerado: %s · %s · %s\n",
+		mark("spec.md", fc.Spec), mark("design.md", fc.Design), mark("tasks.md", fc.Tasks)))
+	if label := detectStackLabel(fc.ProjectStack); label != "" {
+		onChunk("🧱 stack do projeto (autoritativa): " + label + "\n")
+	}
 }
 
 func truncate(s string, n int) string {

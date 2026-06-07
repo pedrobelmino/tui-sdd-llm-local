@@ -421,6 +421,22 @@ func TestModel_ActionSpinnerAdvancesOnTick(t *testing.T) {
 	}
 }
 
+func TestModel_CopyLogOnFeatureDetailUsesLastActionLog(t *testing.T) {
+	m := newTestModel()
+	m.screen = ScreenFeatureDetail
+	m.selectedFeature = "landing-page"
+	m.lastActionLog = strings.Repeat("turn log line\n", 200)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m2 := updated.(RootModel)
+	if m2.statusMsg == "" {
+		t.Fatal("expected status message after y on feature detail")
+	}
+	if !strings.Contains(m2.statusMsg, "bytes") && !strings.Contains(m2.statusMsg, "saved") && !strings.Contains(m2.statusMsg, "copied") {
+		t.Fatalf("unexpected status: %q", m2.statusMsg)
+	}
+}
+
 func TestModel_ActionTitleShowsSpinnerAndPhase(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	m := newTestModel()

@@ -243,6 +243,90 @@ func TestPreflightToolBlock_PlaceholderDir(t *testing.T) {
 	}
 }
 
+// offPlanWiringServer simulates the T4 scenario: the model emits a path-only
+// <file_plan> with a single component, writes it, then writes an integration
+// file (src/index.js) that is NOT in the plan but is in scope.
+func offPlanWiringServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	call := 0
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		call++
+		enc := json.NewEncoder(w)
+		send := func(content string) {
+			_ = enc.Encode(ChatResponse{Model: "test", Message: ChatMessage{Role: "assistant", Content: content}, Done: false})
+			_ = enc.Encode(ChatResponse{Model: "test", Message: ChatMessage{Role: "assistant", Content: ""}, Done: true, PromptEvalCount: 3, EvalCount: 5})
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+		switch call {
+		case 1:
+			send("<file_plan>\nsrc/components/Featured.jsx\n</file_plan>")
+		case 2:
+			send(`<tool_call>{"tool":"write_file","args":{"path":"src/components/Featured.jsx","content":"export default function Featured(){return null}"}}</tool_call>`)
+		case 3:
+			send(`<tool_call>{"tool":"write_file","args":{"path":"src/index.js","content":"import Featured from './components/Featured'"}}</tool_call>`)
+		default:
+			send("done")
+		}
+	}))
+}
+
+func TestChatWithTools_OffPlanWiringFileAllowed(t *testing.T) {
+	srv := offPlanWiringServer(t)
+	defer srv.Close()
+
+	cwt := NewGenerateClient(srv.URL).(GenerateClientWithTools)
+	wrote := map[string]bool{}
+	executor := func(name string, args map[string]any) string {
+		path, _ := args["path"].(string)
+		switch name {
+		case "list_dir":
+			return "src/\npublic/\npackage.json" // brownfield React tree
+		case "write_file":
+			wrote[path] = true
+			return "wrote " + path
+		}
+		return "unknown"
+	}
+
+	ctx := WithModel(context.Background(), "test")
+	ctx = WithTaskPlanMode(ctx, true)
+	ctx = WithSingleTouch(ctx, true)
+	ctx = WithMaxPlanFiles(ctx, 10)
+	ctx = WithMinFileWrites(ctx, 2)
+	ctx = WithFocusedAllowlist(ctx, []string{"featured"})
+
+	out, _, err := cwt.ChatWithTools(ctx, []ChatMessageWithTools{{Role: "user", Content: "implement T4"}}, nil, executor, func(string) {})
+	if err != nil {
+		t.Fatalf("ChatWithTools error: %v", err)
+	}
+	if !strings.Contains(out, "Task complete") {
+		t.Fatalf("output = %q", out)
+	}
+	if !wrote["src/components/Featured.jsx"] {
+		t.Error("planned component file was not written")
+	}
+	if !wrote["src/index.js"] {
+		t.Error("off-plan integration file src/index.js was blocked instead of auto-added to plan")
+	}
+}
+
+func TestPreflightToolBlock_SpecsWrite(t *testing.T) {
+	blocked, reason := preflightToolBlock(toolCallJSON{
+		Tool: "write_file",
+		Args: map[string]any{"path": ".specs/features/3-header-section.md", "content": "x"},
+	}, loopPreflightState{})
+	if !blocked || !strings.Contains(reason, ".specs/") {
+		t.Fatalf("expected .specs block, got blocked=%v reason=%q", blocked, reason)
+	}
+}
+
 func TestPreflightToolBlock_ReadAfterCreate(t *testing.T) {
 	blocked, _ := preflightToolBlock(toolCallJSON{
 		Tool: "read_file",
@@ -268,6 +352,16 @@ func TestLooksLikePrematureDone_JSONSummary(t *testing.T) {
 	}
 	if looksLikePrematureDone("Implemented header, footer, and models.", 2, 2) {
 		t.Fatal("expected valid plain summary to be accepted")
+	}
+}
+
+func TestLooksLikePrematureDone_MarkdownSummary(t *testing.T) {
+	text := "```plaintext\nCreated the following source files:\n\ninternal/app.go\n\nNext steps:\n- Implement components\n```"
+	if !looksLikePrematureDone(text, 1, 4) {
+		t.Fatal("markdown next-steps summary should be premature")
+	}
+	if !looksLikeTextSummary(text) {
+		t.Fatal("should detect text summary")
 	}
 }
 

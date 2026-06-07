@@ -118,6 +118,8 @@ func (m RootModel) handleDetailKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 			id := m.featureTasks[m.taskCursor].ID
 			return m.startAction(ActionRun, m.selectedFeature, "", id, "")
 		}
+	case key.Matches(msg, m.keymap.CopyLog):
+		return m.copyLastActionLog()
 	}
 	return m, nil
 }
@@ -138,6 +140,19 @@ func (m RootModel) handleFormKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 		m.textInput, cmd = m.textInput.Update(msg)
 	}
 	return m, cmd
+}
+
+func (m RootModel) copyLastActionLog() (RootModel, tea.Cmd) {
+	log := m.actionLog
+	if strings.TrimSpace(log) == "" {
+		log = m.lastActionLog
+	}
+	if msg, err := copyActionLog(log); err != nil {
+		m.statusMsg = err.Error()
+	} else {
+		m.statusMsg = msg
+	}
+	return m, nil
 }
 
 func (m RootModel) handleActionKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
@@ -163,12 +178,7 @@ func (m RootModel) handleActionKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 	case msg.String() == "G":
 		return m.scrollActionToBottom(), nil
 	case key.Matches(msg, m.keymap.CopyLog):
-		if msg, err := copyActionLog(m.actionLog); err != nil {
-			m.statusMsg = err.Error()
-		} else {
-			m.statusMsg = msg
-		}
-		return m, nil
+		return m.copyLastActionLog()
 	}
 
 	// Cancel running action with ESC or x.
@@ -430,7 +440,7 @@ func (m RootModel) startAction(kind ActionKind, feature, brief, taskID, prompt s
 	ctx, cancel := context.WithCancel(context.Background())
 	m.actionCancel = cancel
 
-	ch := make(chan tea.Msg, 64)
+	ch := make(chan tea.Msg, 512)
 	m.actionCh = ch
 
 	go runWorkflow(ctx, kind, m.project.Root, feature, brief, taskID, prompt, ch)
@@ -446,8 +456,14 @@ func runWorkflow(ctx context.Context, kind ActionKind, root, feature, brief, tas
 	var output string
 	var err error
 	onChunk := func(s string) {
+		msg := ActionChunkMsg{Text: s}
 		select {
-		case ch <- ActionChunkMsg{Text: s}:
+		case <-ctx.Done():
+			return
+		default:
+		}
+		select {
+		case ch <- msg:
 		case <-ctx.Done():
 		}
 	}

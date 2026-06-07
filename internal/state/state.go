@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/pedrobelmino/tui-sdd-llm-local/internal/project"
 )
 
 var (
@@ -74,20 +76,7 @@ func countADEntries(content string) int {
 }
 
 // UpdateTaskStatus replaces task status in tasks.md.
+// Deprecated: use project.UpdateTaskStatus directly.
 func UpdateTaskStatus(tasksPath, taskID, status string) error {
-	data, err := os.ReadFile(tasksPath)
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(string(data), "\n")
-	for i, line := range lines {
-		if strings.Contains(line, taskID) && strings.Contains(line, "|") {
-			parts := strings.Split(line, "|")
-			if len(parts) >= 4 {
-				parts[len(parts)-2] = " " + status + " "
-				lines[i] = strings.Join(parts, "|")
-			}
-		}
-	}
-	return os.WriteFile(tasksPath, []byte(strings.Join(lines, "\n")), 0o644)
+	return project.UpdateTaskStatus(tasksPath, taskID, status)
 }

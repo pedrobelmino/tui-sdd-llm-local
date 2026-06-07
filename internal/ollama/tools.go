@@ -62,8 +62,8 @@ var _ GenerateClientWithTools = (*genClient)(nil)
 const (
 	toolCallOpen       = "<tool_call>"
 	toolCallClose      = "</tool_call>"
-	maxToolIter        = 30 // default safeguard against infinite loops
-	maxMalformedStreak = 2  // abort on 3rd malformed tool-call JSON
+	maxToolIter        = 100 // hard cap against infinite loops
+	maxMalformedStreak = 2   // abort on 3rd malformed tool-call JSON
 )
 
 // toolCallJSON is the JSON payload inside a <tool_call> block.
@@ -118,6 +118,12 @@ func (c *genClient) ChatWithTools(
 			loopLimit = n
 		}
 	}
+	initialLoopLimit := loopLimit
+
+	taskPlanModeEarly := false
+	if v := ctx.Value(ctxKeyTaskPlanMode{}); v != nil {
+		taskPlanModeEarly, _ = v.(bool)
+	}
 
 	// Pre-load project layout and append to the last user message so the model
 	// starts with directory context — no fake assistant/tool turn needed.
@@ -137,7 +143,7 @@ func (c *genClient) ChatWithTools(
 		layout := buildBootstrapLayout(exec, ldResult)
 		greenfield = isGreenfieldLayout(ldResult)
 		if greenfield {
-			emit(onChunk, "   🌱 greenfield project — no source tree yet")
+			emit(onChunk, "   🌱 greenfield project — no source tree yet; model must emit <file_plan> from tasks.md, spec.md and design.md")
 		} else if bootstrapSatisfiesInspection(ldResult, layout) {
 			emit(onChunk, "   ✓ source tree pre-loaded from bootstrap")
 		}
@@ -148,13 +154,18 @@ func (c *genClient) ChatWithTools(
 				history[i].Content += "\n\n" + layout
 				if greenfield {
 					history[i].Content += "\n\nGREENFIELD PROJECT: only .specs/ exists — no source files yet. " +
-						"Create files with write_file using paths from spec/design/tasks. " +
-						"Do NOT read_file paths that do not exist yet. Do NOT repeat list_dir(\".\")."
+						"Use write_file directly — write_file creates parent directories. " +
+						"Do NOT read_file or list_dir paths that do not exist yet. Do NOT repeat list_dir(\".\")."
 				} else {
 					history[i].Content += "\n\nNOTE: All spec/design/tasks files for the feature are already provided above in the message. " +
 						"Do NOT read them via read_file — use tools only for SOURCE CODE files."
 				}
-				history[i].Content += "\n\nStart making file changes now — respond with a <tool_call> block."
+				if taskPlanModeEarly {
+					history[i].Content += "\n\nStart with a <file_plan> block listing every source file for this task (one path per line), derived from tasks.md, spec.md and design.md above."
+					history[i].Content += "\nFor many files (scaffolding), prefer one-shot <task_plan>{\"files\":[...]}</task_plan> with all contents."
+				} else {
+					history[i].Content += "\n\nStart making file changes now — respond with a <tool_call> block."
+				}
 				break
 			}
 		}
@@ -164,7 +175,29 @@ func (c *genClient) ChatWithTools(
 	lastFailedSig := ""
 	sameFailStreak := 0
 	malformedStreak := 0
+	planNudgeStreak := 0
+	planNoWriteStreak := 0
 	stallScore := 0
+	pathsWritten := map[string]bool{}
+	pathsRead := map[string]bool{}
+	var filePlan []string
+	taskPlanMode := false
+	planReceived := false
+	if v := ctx.Value(ctxKeyTaskPlanMode{}); v != nil {
+		taskPlanMode, _ = v.(bool)
+	}
+	singleTouch := false
+	if v := ctx.Value(ctxKeySingleTouch{}); v != nil {
+		singleTouch, _ = v.(bool)
+	}
+	maxPlanFiles := 0
+	if v := ctx.Value(ctxKeyMaxPlanFiles{}); v != nil {
+		maxPlanFiles, _ = v.(int)
+	}
+	var focusedAllow []string
+	if v := ctx.Value(ctxKeyFocusedAllowlist{}); v != nil {
+		focusedAllow, _ = v.([]string)
+	}
 	consecutiveCreateDirs := 0
 	filesWritten := 0
 	lastCreateDirPath := ""
@@ -177,6 +210,9 @@ func (c *genClient) ChatWithTools(
 		if n, ok := v.(int); ok && n > 0 {
 			minFileWrites = n
 		}
+	}
+	if greenfield && minFileWrites < 4 {
+		minFileWrites = 4
 	}
 
 	for iter := 0; iter < loopLimit; iter++ {
@@ -231,9 +267,104 @@ func (c *genClient) ChatWithTools(
 			return response, totalUsage, fmt.Errorf("%s", msg)
 		}
 
+		// One-shot batch plan: write every file once without further LLM turns.
+		if batch, ok := parseBatchTaskPlan(response); ok {
+			if maxPlanFiles > 0 && len(batch.Files) > maxPlanFiles {
+				emit(onChunk, "⚠ batch plan has %d files (max %d) — rejected", len(batch.Files), maxPlanFiles)
+				history = append(history,
+					ChatMessageWithTools{Role: "assistant", Content: response},
+					ChatMessageWithTools{Role: "user", Content: filePlanTooLargeNudge(maxPlanFiles)},
+				)
+				continue
+			}
+			batchPaths := make([]string, len(batch.Files))
+			for i, f := range batch.Files {
+				batchPaths[i] = f.Path
+			}
+			if bad := offScopePlanPaths(batchPaths, focusedAllow); len(bad) > 0 {
+				emit(onChunk, "⚠ batch plan off-scope: %s", strings.Join(bad, ", "))
+				history = append(history,
+					ChatMessageWithTools{Role: "assistant", Content: response},
+					ChatMessageWithTools{Role: "user", Content: filePlanOffScopeNudge(bad, focusedAllow)},
+				)
+				continue
+			}
+			emit(onChunk, "📋 batch plan: %d file(s) — writing each once…", len(batch.Files))
+			var summary strings.Builder
+			for _, f := range batch.Files {
+				if pathsWritten[f.Path] {
+					emit(onChunk, "❌ duplicate path in batch plan: %s", f.Path)
+					return "", totalUsage, fmt.Errorf("duplicate path in batch plan: %s", f.Path)
+				}
+				emit(onChunk, "🔧 write_file(path=%s, %d bytes)", f.Path, len(f.Content))
+				result := exec("write_file", map[string]any{"path": f.Path, "content": f.Content})
+				if isToolFailure(result) {
+					emit(onChunk, "   ❌ %s", strings.TrimPrefix(result, "ERROR: "))
+					return "", totalUsage, fmt.Errorf("batch plan write failed for %s: %s", f.Path, result)
+				}
+				emit(onChunk, "   ✓ %s", result)
+				pathsWritten[f.Path] = true
+				filesWritten++
+				summary.WriteString(f.Path)
+				summary.WriteString(" ")
+			}
+			emit(onChunk, "✓ batch plan complete (%d files)", len(batch.Files))
+			return "Batch plan executed: " + strings.TrimSpace(summary.String()), totalUsage, nil
+		}
+
 		// Check for tool call tag in the response.
 		tc, found := parseToolCall(response)
 		if !found {
+			// Path-only plan before any tool calls (per-task workflow).
+			if taskPlanMode && !planReceived {
+				if paths, ok := parseFilePlan(response); ok {
+					// Self-heal: drop off-scope paths instead of rejecting the whole plan.
+					if len(focusedAllow) > 0 {
+						if kept := dropOffScopePaths(paths, focusedAllow); len(kept) > 0 && len(kept) < len(paths) {
+							emit(onChunk, "   ✂ dropped %d off-scope path(s) from plan", len(paths)-len(kept))
+							paths = kept
+						}
+					}
+					// Self-heal: cap oversized plans to the task limit.
+					if maxPlanFiles > 0 && len(paths) > maxPlanFiles {
+						emit(onChunk, "   ✂ trimmed plan from %d to %d path(s)", len(paths), maxPlanFiles)
+						paths = paths[:maxPlanFiles]
+					}
+					if len(paths) == 0 {
+						planNudgeStreak++
+						emit(onChunk, "⚠ plan had no in-scope paths (attempt %d)", planNudgeStreak)
+						history = append(history,
+							ChatMessageWithTools{Role: "assistant", Content: response},
+							ChatMessageWithTools{Role: "user", Content: filePlanNudge()},
+						)
+						continue
+					}
+					filePlan = paths
+					planReceived = true
+					planNudgeStreak = 0
+					bumpLoopLimitForPlan(&loopLimit, len(paths))
+					emit(onChunk, "📋 file plan (%d): %s", len(paths), strings.Join(paths, ", "))
+					if loopLimit > initialLoopLimit {
+						emit(onChunk, "   📎 turn budget raised to %d for planned files", loopLimit)
+					}
+					history = append(history,
+						ChatMessageWithTools{Role: "assistant", Content: response},
+						ChatMessageWithTools{Role: "user", Content: "Plan accepted. " + planWriteNudge(filePlan, pathsWritten)},
+					)
+					continue
+				}
+				planNudgeStreak++
+				emit(onChunk, "⚠ file plan required before tools (attempt %d)…", planNudgeStreak)
+				if planNudgeStreak <= 2 {
+					history = append(history,
+						ChatMessageWithTools{Role: "assistant", Content: response},
+						ChatMessageWithTools{Role: "user", Content: filePlanNudge()},
+					)
+					continue
+				}
+				taskPlanMode = false
+				emit(onChunk, "⚠ continuing without file plan — write each path at most once")
+			}
 			// Model attempted a tool call but emitted malformed JSON/code block.
 			if looksLikeMalformedToolCall(response) {
 				malformedStreak++
@@ -254,22 +385,50 @@ func (c *genClient) ChatWithTools(
 				continue
 			}
 			malformedStreak = 0
-			// If iter==0 and the model wrote a plan instead of a tool call, nudge once.
-			if iter == 0 && looksLikePlan(response) {
-				emit(onChunk, "⚠  model wrote a plan instead of calling tools — retrying…")
+			// If the model wrote a plan/description instead of a tool call, escalate nudge.
+			if looksLikePlan(response) {
+				planNoWriteStreak++
+				emit(onChunk, "⚠ model described instead of calling tools (attempt %d)…", planNoWriteStreak)
+				var nudge string
+				if planNoWriteStreak >= 2 && planReceived && len(remainingPlanFiles(filePlan, pathsWritten)) > 0 {
+					nudge = directWriteNudge(remainingPlanFiles(filePlan, pathsWritten)[0])
+				} else {
+					nudge = "Do not describe. Respond with ONLY a <tool_call> block to start making file changes."
+				}
 				history = append(history,
 					ChatMessageWithTools{Role: "assistant", Content: response},
-					ChatMessageWithTools{Role: "user", Content: "Do not describe. Respond with a <tool_call> block to start making file changes."},
+					ChatMessageWithTools{Role: "user", Content: nudge},
 				)
 				continue
 			}
-			if looksLikePrematureDone(response, filesWritten, minFileWrites) {
+			if planReceived && len(remainingPlanFiles(filePlan, pathsWritten)) > 0 {
+				rem := remainingPlanFiles(filePlan, pathsWritten)
+				planNoWriteStreak++
+				emit(onChunk, "⚠ incomplete — %d planned file(s) not written yet (attempt %d)", len(rem), planNoWriteStreak)
+				var nudge string
+				if planNoWriteStreak >= 2 && len(rem) > 0 {
+					nudge = directWriteNudge(rem[0])
+				} else {
+					nudge = planWriteNudge(filePlan, pathsWritten)
+				}
+				history = append(history,
+					ChatMessageWithTools{Role: "assistant", Content: response},
+					ChatMessageWithTools{Role: "user", Content: nudge},
+				)
+				continue
+			}
+			// A completed file plan means the task is done — don't force extra files.
+			planComplete := planReceived && len(filePlan) > 0 && len(remainingPlanFiles(filePlan, pathsWritten)) == 0
+			if !planComplete && looksLikePrematureDone(response, filesWritten, minFileWrites) {
 				emit(onChunk, "⚠ premature completion — spec/tasks require more file changes")
 				history = append(history,
 					ChatMessageWithTools{Role: "assistant", Content: response},
-					ChatMessageWithTools{Role: "user", Content: prematureDoneNudge(filesWritten, minFileWrites)},
+					ChatMessageWithTools{Role: "user", Content: prematureDoneNudge(filesWritten, minFileWrites, greenfield)},
 				)
 				continue
+			}
+			if planComplete {
+				emit(onChunk, "✓ all %d planned files written — task complete", len(filePlan))
 			}
 			// Final answer — stream it to the log now that we know it's the summary.
 			if onChunk != nil {
@@ -292,6 +451,20 @@ func (c *genClient) ChatWithTools(
 			continue
 		}
 
+		// Soft <file_plan>: auto-amend in-scope paths; plan size capped by maxPlanFiles.
+		if planReceived && len(filePlan) > 0 && (tc.Tool == "write_file" || tc.Tool == "edit_file") {
+			if p := toolPath(tc); p != "" && !stringInSlice(p, filePlan) && pathMatchesFocusedAllowlist(p, focusedAllow) {
+				capN := maxPlanFiles
+				if capN <= 0 {
+					capN = len(filePlan) + 6
+				}
+				if len(filePlan) < capN {
+					filePlan = append(filePlan, p)
+					emit(onChunk, "   ➕ %s added to file plan (extra/integration file)", p)
+				}
+			}
+		}
+
 		if blocked, reason := preflightToolBlock(tc, loopPreflightState{
 			lastCreateDirPath:     lastCreateDirPath,
 			consecutiveCreateDirs: consecutiveCreateDirs,
@@ -301,6 +474,12 @@ func (c *genClient) ChatWithTools(
 			lastFailedReadPath:    lastFailedReadPath,
 			lastToolSig:           lastToolSig,
 			lastFailedSig:         lastFailedSig,
+			singleTouch:           singleTouch,
+			pathsWritten:          pathsWritten,
+			pathsRead:             pathsRead,
+			filePlan:              filePlan,
+			planReceived:          planReceived,
+			focusedAllow:          focusedAllow,
 		}); blocked {
 			if abort, err := recordToolFailure(&lastFailedSig, &sameFailStreak, &stallScore, &lastToolSig, &history, tc, response, reason, maxSameFailStreak, onChunk); abort {
 				return "", totalUsage, err
@@ -340,11 +519,32 @@ func (c *genClient) ChatWithTools(
 		if tc.Tool == "write_file" || tc.Tool == "edit_file" {
 			if !isToolFailure(result) {
 				filesWritten++
+				planNoWriteStreak = 0
+				pathsWritten[toolPath(tc)] = true
+				bumpLoopLimitForProgress(&loopLimit, filesWritten, filePlan, pathsWritten)
 				consecutiveCreateDirs = 0
 				stallScore = 0
 				sameFailStreak = 0
 				lastFailedSig = ""
+				// Auto-complete when every planned file is written — don't burn turns waiting for summary.
+				if planReceived && len(filePlan) > 0 &&
+					len(remainingPlanFiles(filePlan, pathsWritten)) == 0 &&
+					filesWritten >= minFileWrites {
+					var names []string
+					for p := range pathsWritten {
+						names = append(names, p)
+					}
+					summary := fmt.Sprintf("Task complete — wrote %d file(s): %s", filesWritten, strings.Join(names, ", "))
+					emit(onChunk, "✓ all %d planned files written — task complete", len(filePlan))
+					if onChunk != nil {
+						onChunk(summary + "\n")
+					}
+					return summary, totalUsage, nil
+				}
 			}
+		}
+		if tc.Tool == "read_file" && !isToolFailure(result) {
+			pathsRead[toolPath(tc)] = true
 		}
 		if tc.Tool == "create_dir" {
 			lastCreateDirPath = toolPath(tc)
@@ -361,7 +561,7 @@ func (c *genClient) ChatWithTools(
 			continue
 		} else {
 			emit(onChunk, "   ✓ %s", result)
-			continuation = autoInspectNote + buildSuccessContinuation(tc, result, greenfield)
+			continuation = autoInspectNote + buildSuccessContinuation(tc, result, greenfield, filePlan, pathsWritten, singleTouch)
 			sameFailStreak = 0
 			lastFailedSig = ""
 			if tc.Tool == "create_dir" || tc.Tool == "list_dir" {
@@ -379,8 +579,12 @@ func (c *genClient) ChatWithTools(
 		)
 	}
 
-	emit(onChunk, "✗ tool-calling loop exceeded %d iterations", loopLimit)
-	emit(onChunk, "Hint: model may be stuck on empty dirs or directory read_file. Split into smaller tasks (tsll run) or retry implement.")
+	emit(onChunk, "✗ tool-calling loop exceeded %d iterations (%d file(s) written)", loopLimit, filesWritten)
+	if filesWritten > 0 {
+		emit(onChunk, "Hint: partial progress saved — retry the same task: tsll run <feature> <task>")
+	} else {
+		emit(onChunk, "Hint: model may be stuck on empty dirs or directory read_file. Split into smaller tasks (tsll run) or retry implement.")
+	}
 	return "", totalUsage, fmt.Errorf("tool-calling loop exceeded %d iterations", loopLimit)
 }
 
@@ -875,24 +1079,53 @@ func looksLikePrematureDone(text string, filesWritten, minWrites int) bool {
 	if filesWritten >= minWrites {
 		return false
 	}
+	if looksLikeTextSummary(text) {
+		return true
+	}
 	t := strings.TrimSpace(text)
 	lower := strings.ToLower(t)
 	if strings.HasPrefix(t, "{") && strings.Contains(lower, "summary") {
-		return filesWritten < minWrites || minWrites > 1
+		return true
 	}
 	if filesWritten == 0 {
 		return !strings.Contains(t, toolCallOpen)
 	}
-	return filesWritten < minWrites && (strings.HasPrefix(t, "{") || len(t) < 400)
+	// Any non-tool prose before min writes met is premature.
+	return !strings.Contains(t, toolCallOpen)
 }
 
-func prematureDoneNudge(filesWritten, minWrites int) string {
-	return fmt.Sprintf(
+func looksLikeTextSummary(text string) bool {
+	lower := strings.ToLower(text)
+	if strings.Contains(text, "```") {
+		return true
+	}
+	for _, p := range []string{
+		"next steps", "let me know", "created the following",
+		"further assistance", "here is a summary", "summary:",
+		"implementation complete", "basic structure", "if you need",
+		"do not describe", "the following source files",
+	} {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func prematureDoneNudge(filesWritten, minWrites int, greenfield bool) string {
+	msg := fmt.Sprintf(
 		"You tried to finish too early (%d file change(s), need at least %d). "+
 			"The task is NOT complete. Respond with a <tool_call> to implement the next required file per spec.md, design.md, and tasks.md. "+
-			"Do NOT output JSON summaries until all required code exists.",
+			"Do NOT write prose summaries or markdown until all required code exists.",
 		filesWritten, minWrites,
 	)
+	if greenfield {
+		msg += " GREENFIELD: create the main entry point, components, and wiring — not just one stub file."
+	}
+	if filesWritten > 0 && filesWritten < minWrites {
+		msg += " Start with <file_plan> if you have not listed all paths yet."
+	}
+	return msg
 }
 
 func looksLikePlan(text string) bool {
@@ -913,6 +1146,10 @@ func looksLikePlan(text string) bool {
 type ctxKeyModel struct{}
 type ctxKeyToolLoopLimit struct{}
 type ctxKeyMinFileWrites struct{}
+type ctxKeyTaskPlanMode struct{}
+type ctxKeySingleTouch struct{}
+type ctxKeyMaxPlanFiles struct{}
+type ctxKeyFocusedAllowlist struct{}
 
 // WithModel attaches the model name to a context for ChatWithTools.
 func WithModel(ctx context.Context, model string) context.Context {
@@ -935,6 +1172,38 @@ func WithMinFileWrites(ctx context.Context, n int) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, ctxKeyMinFileWrites{}, n)
+}
+
+// WithTaskPlanMode requires a <file_plan> listing all paths before write_file calls.
+func WithTaskPlanMode(ctx context.Context, enabled bool) context.Context {
+	if !enabled {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyTaskPlanMode{}, true)
+}
+
+// WithSingleTouch blocks second read/write/edit on the same path within one task loop.
+func WithSingleTouch(ctx context.Context, enabled bool) context.Context {
+	if !enabled {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeySingleTouch{}, true)
+}
+
+// WithMaxPlanFiles caps paths in <file_plan> for focused tasks.
+func WithMaxPlanFiles(ctx context.Context, n int) context.Context {
+	if n <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyMaxPlanFiles{}, n)
+}
+
+// WithFocusedAllowlist restricts write paths to fragments matching the task (e.g. header).
+func WithFocusedAllowlist(ctx context.Context, fragments []string) context.Context {
+	if len(fragments) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxKeyFocusedAllowlist{}, fragments)
 }
 
 func formatToolInvocation(tc toolCallJSON) string {
@@ -974,6 +1243,12 @@ type loopPreflightState struct {
 	lastFailedReadPath    string
 	lastToolSig           string
 	lastFailedSig         string
+	singleTouch           bool
+	pathsWritten          map[string]bool
+	pathsRead             map[string]bool
+	filePlan              []string
+	planReceived          bool
+	focusedAllow          []string
 }
 
 func preflightToolBlock(tc toolCallJSON, st loopPreflightState) (bool, string) {
@@ -986,6 +1261,13 @@ func preflightToolBlock(tc toolCallJSON, st loopPreflightState) (bool, string) {
 	}
 	if tc.Tool == "list_dir" && path == "." && st.rootListed {
 		return true, "root layout was already loaded — inspect a specific directory or write_file the next source file"
+	}
+	normPath := strings.ReplaceAll(strings.Trim(path, "/"), "\\", "/")
+	if tc.Tool == "write_file" || tc.Tool == "edit_file" || tc.Tool == "delete_file" || tc.Tool == "create_dir" {
+		if normPath == ".specs" || strings.HasPrefix(normPath, ".specs/") {
+			return true, "NEVER write under .specs/ — tsll manages spec/design/tasks automatically. " +
+				"Implement SOURCE files in src/ or public/ only. Task IDs (T3) and numbers are NOT spec file paths."
+		}
 	}
 	if tc.Tool == "read_file" && st.lastFailedReadPath != "" && path == st.lastFailedReadPath {
 		return true, "file " + path + " does not exist — use write_file to create it with full content from the spec"
@@ -1012,7 +1294,61 @@ func preflightToolBlock(tc toolCallJSON, st loopPreflightState) (bool, string) {
 	if tc.Tool == "create_dir" && isPlaceholderPath(path) && st.filesWritten == 0 {
 		return true, "do not create placeholder directory " + path + " — implement paths from spec/design/tasks"
 	}
+	if st.greenfield && tc.Tool == "create_dir" {
+		base := strings.Trim(path, "/")
+		if base == "internal" || base == "src" || base == "app" || base == "cmd" || base == "pkg" {
+			return true, "write_file creates parent directories — write the source file directly (e.g. " + path + "/app.go) instead of create_dir"
+		}
+	}
+	if st.greenfield && tc.Tool == "list_dir" && path != "." {
+		return true, "write_file creates missing dirs — write source files directly"
+	}
+	if st.singleTouch {
+		switch tc.Tool {
+		case "write_file", "edit_file":
+			if st.pathsWritten[path] {
+				if st.planReceived && len(st.filePlan) > 0 && len(remainingPlanFiles(st.filePlan, st.pathsWritten)) == 0 {
+					return true, "already wrote " + path + " — all planned files are done; respond with a plain-text summary (no tool call)"
+				}
+				return true, "already wrote " + path + " this task — each file gets ONE write_file with complete content; move to the next planned file or finish"
+			}
+		case "read_file":
+			if st.pathsWritten[path] {
+				return true, path + " is already written — do not re-read; continue with remaining files in your plan"
+			}
+			if st.pathsRead[path] {
+				return true, "already read " + path + " — write_file once with full content instead of reading again"
+			}
+		}
+	}
+	if st.planReceived && len(st.filePlan) > 0 && (tc.Tool == "write_file" || tc.Tool == "edit_file") {
+		if !stringInSlice(path, st.filePlan) {
+			// Soft plan: in-scope paths may be added at runtime; off-scope paths are blocked.
+			if len(st.focusedAllow) > 0 {
+				if !pathMatchesFocusedAllowlist(path, st.focusedAllow) {
+					return true, path + " belongs to another section — this task only allows paths matching: " +
+						strings.Join(st.focusedAllow, ", ") + " (plus App.js/index.js wiring). Do NOT rewrite Header/Footer/other sections."
+				}
+				// In-scope but not listed in plan — allowed (plan is a guide, not a cage).
+				return false, ""
+			}
+		}
+	}
+	if len(st.focusedAllow) > 0 && (tc.Tool == "write_file" || tc.Tool == "edit_file") {
+		if !pathMatchesFocusedAllowlist(path, st.focusedAllow) {
+			return true, path + " is outside this task's scope — only implement paths matching: " + strings.Join(st.focusedAllow, ", ") + " (plus App.js wiring)"
+		}
+	}
 	return false, ""
+}
+
+func stringInSlice(s string, list []string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func isPlaceholderPath(path string) bool {
@@ -1065,18 +1401,28 @@ func isGreenfieldLayout(rootListing string) bool {
 	return true
 }
 
-func buildSuccessContinuation(tc toolCallJSON, result string, greenfield bool) string {
+func buildSuccessContinuation(tc toolCallJSON, result string, greenfield bool, filePlan []string, written map[string]bool, singleTouch bool) string {
 	switch tc.Tool {
 	case "list_dir":
 		if greenfield {
 			return "Tool result:\n" + result + "\n\nGREENFIELD: write_file the source files named in the spec — do not keep listing directories."
 		}
-		return "Tool result:\n" + result + "\n\nPick a relevant source file from this listing and read_file it, or write_file the next required file."
+		return "Tool result:\n" + result + "\n\nRead each needed file at most once, then write_file each path once with complete content."
 	case "read_file":
-		return "Tool result:\n" + result + "\n\nApply the required change with edit_file or write_file, then continue with the next file."
+		msg := "Tool result:\n" + result + "\n\nNow write_file this path ONCE with the complete final content — do not read it again."
+		if len(filePlan) > 0 {
+			msg += "\n\n" + planWriteNudge(filePlan, written)
+		}
+		return msg
 	case "create_dir":
 		return "Tool result:\n" + result + "\n\nDirectory exists. Next: write_file the actual source file — do not read_file the empty directory."
 	case "write_file", "edit_file":
+		if len(filePlan) > 0 {
+			return "Tool result:\n" + result + "\n\n" + planWriteNudge(filePlan, written)
+		}
+		if singleTouch {
+			return "Tool result:\n" + result + "\n\nGood — do not touch this path again. Write the next file once, or summarize when done."
+		}
 		return "Tool result:\n" + result + "\n\nGood. Continue with the next required file change, or write a plain-text summary when done."
 	default:
 		return "Tool result:\n" + result + "\n\nContinue with the next required change."

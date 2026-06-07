@@ -4,25 +4,50 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/atotto/clipboard"
 )
 
-// copyActionLog copies text to the system clipboard, or saves to ~/.tsll/last-action.log.
-func copyActionLog(text string) (string, error) {
-	if text == "" {
-		return "", fmt.Errorf("log is empty")
+func lastActionLogPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
 	}
-	if err := clipboard.WriteAll(text); err == nil {
-		_, _ = saveActionLogFile(text)
-		return "log copied to clipboard", nil
+	return filepath.Join(home, ".tsll", "last-action.log")
+}
+
+// readLastActionLogFile returns the most recently saved action log from disk.
+func readLastActionLogFile() (string, error) {
+	path := lastActionLogPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// copyActionLog saves the full log to disk first, then copies to clipboard when possible.
+func copyActionLog(text string) (string, error) {
+	if strings.TrimSpace(text) == "" {
+		var err error
+		text, err = readLastActionLogFile()
+		if err != nil || strings.TrimSpace(text) == "" {
+			return "", fmt.Errorf("log is empty — run an action first")
+		}
 	}
 	path, err := saveActionLogFile(text)
 	if err != nil {
 		return "", err
 	}
-	return "clipboard unavailable — saved to " + path, nil
+	lines := strings.Count(text, "\n") + 1
+	nbytes := len(text)
+	meta := fmt.Sprintf("%d lines, %d bytes", lines, nbytes)
+	if err := clipboard.WriteAll(text); err == nil {
+		return fmt.Sprintf("copied full log (%s) — backup at %s", meta, path), nil
+	}
+	return fmt.Sprintf("clipboard unavailable — saved full log (%s) to %s", meta, path), nil
 }
 
 func saveActionLogFile(text string) (string, error) {
@@ -41,5 +66,13 @@ func saveActionLogFile(text string) (string, error) {
 	}
 	latest := filepath.Join(dir, "last-action.log")
 	_ = os.WriteFile(latest, []byte(text), 0o644)
-	return path, nil
+	return latest, nil
+}
+
+// persistActionLogIncremental writes the in-progress log so it survives crashes and y-after-esc.
+func persistActionLogIncremental(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	_, _ = saveActionLogFile(text)
 }

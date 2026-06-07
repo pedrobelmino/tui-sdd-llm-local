@@ -37,6 +37,17 @@ func TestBuildAskUserMsg_IncludesQuestionAndSpec(t *testing.T) {
 	}
 }
 
+func TestEstimateTaskLoopLimit_Scaffolding(t *testing.T) {
+	got := estimateTaskLoopLimit("### T2: Scaffold project structure with CI workflows", true)
+	if got < 55 {
+		t.Fatalf("scaffold fast limit = %d, want >= 55", got)
+	}
+	header := estimateTaskLoopLimit("### T3: Develop Header Section", true)
+	if header > 22 {
+		t.Fatalf("header limit = %d, want <= 22", header)
+	}
+}
+
 func TestParseLandingPageTasks(t *testing.T) {
 	content := `### 1. Analyze Requirements (T1)
 x

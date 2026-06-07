@@ -125,6 +125,7 @@ Rules:
 - Use file tools to create and edit files. Do NOT describe changes.
 - One tool call per response — no extra text before or after the JSON.
 - Follow spec.md, design.md, and tasks.md EXACTLY — implement every component/file the task requires.
+- COMPLETENESS: every file must be a complete, functional implementation that fully satisfies the spec/tasks "Done when" criteria — real markup/styles/logic, NOT a stub. No TODO/FIXME, no empty components, no placeholder content.
 - Use the PROJECT tech stack from the user message; if design.md mentions another framework, adapt to the project stack.
 - BEFORE editing any existing file: call read_file to verify it exists and see its content.
 - NEVER read_file a directory — use list_dir for directories.
@@ -133,6 +134,8 @@ Rules:
 - If read_file returns ERROR (file not found): use write_file to create the file (greenfield) or list_dir on the parent.
 - Do NOT stop after one file. Do NOT output JSON {"summary":...} until ALL required code for the task exists.
 - write_file: args.content MUST contain the complete file body as a string — never empty, never 0 bytes.
+- NEVER write/edit/delete/create under .specs/ — spec, design, and tasks.md are managed by tsll, not by file tools.
+- Requirement IDs (FEAT-01, AUTH-02) are labels inside spec.md — they are NOT feature folder names.
 - After ALL required changes are done: write a plain-text summary (no tool call tag, no JSON).
 
 Coding principles:
@@ -151,6 +154,7 @@ Rules:
 - Use file tools to create and edit files. Do NOT describe changes.
 - One tool call per response — no extra text before or after the JSON.
 - Implement exactly what the task describes — every file and component listed in spec/design.
+- COMPLETENESS: each file must be a complete, functional implementation that fully satisfies the task's "Done when" criteria — real markup/styles/logic, NOT a stub. No TODO/FIXME, no empty components, no "// add content here" placeholders.
 - Use the PROJECT tech stack from the user message; adapt design.md to that stack.
 - BEFORE editing any existing file: call read_file to verify it exists.
 - NEVER read_file a directory — use list_dir for directories.
@@ -158,7 +162,11 @@ Rules:
 - write_file creates parent directories — avoid create_dir unless truly needed.
 - If read_file returns ERROR: use write_file to create the file or list_dir on the parent.
 - Do NOT stop after one file. Do NOT output JSON {"summary":...} until the task is complete.
+- PLAN FIRST: <file_plan> listing all paths, then write_file each path exactly ONCE with full content.
+- Prefer write_file over edit_file. Never write or read the same path twice in one task.
 - write_file: args.content MUST contain the complete file body as a string — never empty, never 0 bytes.
+- NEVER write/edit/delete/create under .specs/ — tsll updates tasks.md in the feature folder automatically.
+- Requirement IDs (FEAT-01) are NOT paths — use the feature slug from the user message (e.g. landing-page).
 - After ALL changes are done: write a plain-text summary (no tool call tag, no JSON).
 
 Coding principles:

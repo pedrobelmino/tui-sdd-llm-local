@@ -78,6 +78,7 @@ type RootModel struct {
 	actionPrompt       string // quick-task prompt or follow-up instruction
 	actionPhase        string // current phase label shown in title
 	actionLog          string
+	lastActionLog      string // survives leaving ScreenAction — used by y on detail view
 	actionNeedsInput   bool
 	actionQuestion     string
 	actionScrollLine   int
@@ -244,6 +245,7 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ActionChunkMsg:
 		m.actionLog += msg.Text
+		persistActionLogIncremental(m.actionLog)
 		m.actionPhase = detectPhase(msg.Text, m.actionPhase)
 		if m.actionFollowTail {
 			m = m.scrollActionToBottom()
@@ -298,6 +300,7 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionPhase = "done"
 		}
 		if m.actionLog != "" {
+			m.lastActionLog = m.actionLog
 			_, _ = saveActionLogFile(m.actionLog)
 		}
 		m = m.scrollActionToBottom()
@@ -354,7 +357,7 @@ func (m RootModel) View() string {
 		}
 	case ScreenFeatureDetail:
 		main = m.renderFeatureDetailBody(w, mainH)
-		footer = "esc: back │ p: ask │ e: run task │ a: impl all │ s/d/t: spec/design/tasks"
+		footer = "esc: back │ p: ask │ e: run task │ a: impl all │ y: copy log │ s/d/t: spec/design/tasks"
 	default:
 		main = m.renderBody(w, h)
 		footer = FooterBindings()

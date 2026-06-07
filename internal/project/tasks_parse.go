@@ -14,9 +14,12 @@ type TaskEntry struct {
 }
 
 var (
-	taskHeaderRe    = regexp.MustCompile(`^### (T\d+):\s*(.+)$`)
-	taskHeaderAltRe = regexp.MustCompile(`^### (?:\d+\.\s*)?(.+?)\s*\((T\d+)\)\s*$`)
+	taskHeaderRe    = regexp.MustCompile(`^#{2,4}\s+(?:New Task:\s*)?(T\d+):\s*(.+)$`)
+	taskHeaderAltRe = regexp.MustCompile(`^#{2,4}\s+(?:New Task:\s*)?(?:\d+\.\s*)?(.+?)\s*\((T\d+)\)\s*$`)
 	statusRowRe     = regexp.MustCompile(`^\|\s*(T\d+)\s*\|\s*([^|]+)\|`)
+	inlineStatusRe  = regexp.MustCompile(`(?m)^\*\*Status\*\*:\s*(.+)$`)
+	trackerHeadRe   = regexp.MustCompile(`(?i)^#{2,4}\s+Status Tracker`)
+	headingRe       = regexp.MustCompile(`^#{1,6}\s+`)
 )
 
 // ParseTasks reads task IDs, titles and status from tasks.md.
@@ -35,29 +38,38 @@ func ParseTasksContent(content string) []TaskEntry {
 
 	lines := strings.Split(content, "\n")
 	inTracker := false
+	currentTaskID := ""
 
 	for _, line := range lines {
 		trim := strings.TrimSpace(line)
-		if strings.HasPrefix(trim, "## Status Tracker") {
+		if trackerHeadRe.MatchString(trim) {
 			inTracker = true
+			currentTaskID = ""
 			continue
 		}
-		if inTracker && strings.HasPrefix(trim, "## ") {
+		if inTracker && headingRe.MatchString(trim) {
 			inTracker = false
 		}
 
 		if m := taskHeaderRe.FindStringSubmatch(trim); len(m) == 3 {
-			titles[m[1]] = strings.TrimSpace(m[2])
-			if _, ok := statuses[m[1]]; !ok {
-				statuses[m[1]] = "Pending"
+			currentTaskID = m[1]
+			titles[currentTaskID] = strings.TrimSpace(m[2])
+			if _, ok := statuses[currentTaskID]; !ok {
+				statuses[currentTaskID] = "Pending"
 			}
 			continue
 		}
 		if m := taskHeaderAltRe.FindStringSubmatch(trim); len(m) == 3 {
-			titles[m[2]] = strings.TrimSpace(m[1])
-			if _, ok := statuses[m[2]]; !ok {
-				statuses[m[2]] = "Pending"
+			currentTaskID = m[2]
+			titles[currentTaskID] = strings.TrimSpace(m[1])
+			if _, ok := statuses[currentTaskID]; !ok {
+				statuses[currentTaskID] = "Pending"
 			}
+			continue
+		}
+
+		if m := inlineStatusRe.FindStringSubmatch(line); len(m) == 2 && currentTaskID != "" {
+			statuses[currentTaskID] = normalizeTaskStatus(strings.TrimSpace(m[1]))
 			continue
 		}
 

@@ -108,6 +108,7 @@ func HelpOverlay() string {
 		"  e / enter    run selected task (needs tasks)",
 		"  p            ask about feature (read-only Q&A)",
 		"  a            implement all pending tasks (needs spec)",
+		"  y            copy last action log (full, from disk)",
 		"  s            regenerate spec",
 		"  d            regenerate design",
 		"  t            regenerate tasks",

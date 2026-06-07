@@ -64,6 +64,13 @@ tsll run landing-page --task T3
 
 Durante `implement` / `run`, o modelo usa ferramentas de arquivo (`read_file`, `write_file`, `list_dir`, …) num loop supervisionado — você vê cada passo na TUI ou no stdout.
 
+Logs de implementação mostram explicitamente o contexto carregado:
+
+```
+📚 contexto considerado: spec.md (3120 chars) · design.md (1840 chars) · tasks.md (2100 chars)
+🧱 stack do projeto (autoritativa): React/JS
+```
+
 ---
 
 ## Dashboard TUI
@@ -196,7 +203,7 @@ model: qwen2.5-coder:3b
 ollama_host: http://127.0.0.1:11434
 gpu_prefer: amd      # amd | nvidia | auto
 theme: k9s
-fast_mode: true      # loop mais curto — melhor para GPUs modestas
+fast_mode: false     # false = contexto completo de spec/design/tasks (melhor para <file_plan>)
 ```
 
 **Por projeto:** `.tsllrc` no diretório do repo.
@@ -206,21 +213,52 @@ fast_mode: true      # loop mais curto — melhor para GPUs modestas
 | `OLLAMA_HOST` | URL do Ollama |
 | `TSLL_MODEL` | Override do modelo |
 | `TSLL_GPU_PREFER` | `amd` ou `nvidia` |
-| `TSLL_FAST=0` | Desliga fast mode |
+| `TSLL_FAST=1` | Liga fast mode (trunca spec/design/tasks — mais rápido, pior para implement) |
 | `TSLL_TUI=0` | `tsll` sem args não abre TUI |
 | `NO_COLOR` | Saída sem cores |
+
+**Reiniciar modelo na VRAM** (útil se o Ollama travar ou ficar lento):
+
+```bash
+ollama stop qwen2.5-coder:3b    # descarrega da memória
+ollama ps                       # confirma que nada está carregado
+# próximo tsll run/implement recarrega automaticamente
+sudo systemctl restart ollama   # reinicia o serviço inteiro (systemd)
+```
 
 ---
 
 ## Modelos recomendados
 
+### GPU modesta (~4 GB VRAM)
+
 | Modelo | VRAM ~ | Uso |
 |--------|--------|-----|
-| `qwen2.5-coder:3b` | ~2 GB | **Padrão** — rápido, ideal para GPUs modestas |
+| `qwen2.5-coder:3b` | ~2 GB | **Recomendado** — cabe na VRAM com folga para contexto e `<file_plan>` |
+| `qwen2.5-coder:3b-instruct-q4_K_M` | ~2 GB | Variante instruct — melhor para seguir formato de resposta |
+| `deepseek-coder:6.7b-instruct-q3_K_M` | ~3,3 GB | Mais capaz, mas apertado em 4 GB — pode offload parcial para CPU |
+
+Evite quantizações Q8 ou modelos 7B+ em GPUs de 4 GB: ocupam quase toda a VRAM e pioram o loop de implementação.
+
+### GPUs com mais VRAM
+
+| Modelo | VRAM ~ | Uso |
+|--------|--------|-----|
 | `qwen2.5-coder:7b` | ~5 GB | Melhor qualidade de código |
 | `qwen2.5-coder:14b` | ~9 GB | Implementações mais assertivas |
 
-Com modelos **3B**, prefira `tsll run <feature> --task Tn` (uma tarefa por vez) em vez de `implement` completo. O tool loop tem guardrails para modelos pequenos: bootstrap do layout, fail-fast em erros repetidos, e parsing tolerante de JSON malformado.
+### Dicas para modelos 3B
+
+Com modelos **3B**, prefira **`tsll run <feature> --task Tn`** (uma tarefa por vez) em vez de `implement` completo. Use **`fast_mode: false`** em `~/.tsll/config.yaml` — o contexto completo de `spec.md`, `design.md` e `tasks.md` ajuda o modelo a montar o `<file_plan>`.
+
+O tool loop tem guardrails para modelos pequenos:
+
+- Bootstrap do layout do projeto antes do primeiro turno
+- `<file_plan>` derivado de **tasks.md** + spec/design (plano flexível — arquivos de integração extras permitidos dentro do escopo da tarefa)
+- Allowlist por seção (header, product, contact…) — evita reescrever partes erradas da app
+- Auto-conclusão quando todos os arquivos planejados foram escritos
+- Fail-fast em erros repetidos e parsing tolerante de JSON malformado
+- Bloqueio de escrita em `.specs/` (gerenciado pelo tsll, não pelo modelo)
 
 ---
 
@@ -266,7 +304,8 @@ O `implement` respeita a **stack definida em `PROJECT.md`** — mesmo que `desig
 - **Ollama HTTP API** com streaming e contagem de tokens
 - **GPU metrics:** AMD (`amdgpu` + `rocm-smi`) e NVIDIA (`nvidia-smi`)
 - **Host metrics:** `/proc` (CPU, RAM, swap) + `statfs` (disco)
-- **Tool loop:** o modelo emite `<tool_call>{"tool":"write_file",…}</tool_call>`; o runtime executa, retorna resultado, e continua até concluir ou atingir limite
+- **Tool loop:** o modelo emite `<file_plan>` (paths da tarefa) e depois `<tool_call>{"tool":"write_file",…}</tool_call>`; o runtime executa, retorna resultado, e continua até concluir ou atingir limite
+- **Implementação:** segue `tasks.md` (plano por tarefa), `spec.md` e `design.md`; a stack em `PROJECT.md` é autoritativa
 
 ---
 
@@ -292,7 +331,7 @@ Documentação de arquitetura do próprio projeto: `.specs/codebase/`
 - Dashboard TUI com métricas de GPU, tokens e sistema
 - Fluxo completo: init → specify → design → tasks → implement / run
 - Ask mode (read-only Q&A sobre features)
-- Tool loop com guardrails para modelos pequenos
+- Tool loop com guardrails para modelos pequenos (plano flexível, escopo por tarefa, auto-complete)
 - Cancelamento de ações (`x` / `esc`) e cópia de log (`y`)
 - `doctor` e `validate`
 - Integração com convenções `tlc-spec-driven`

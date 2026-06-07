@@ -7,6 +7,20 @@ import (
 	"testing"
 )
 
+func TestCopyActionLogEmptyReadsFile(t *testing.T) {
+	_, err := saveActionLogFile("persisted full log from disk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := copyActionLog("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(msg, "persisted full log") && !strings.Contains(msg, "bytes") {
+		t.Fatalf("unexpected status: %q", msg)
+	}
+}
+
 func TestSaveActionLogFile(t *testing.T) {
 	path, err := saveActionLogFile("hello implement log")
 	if err != nil {
