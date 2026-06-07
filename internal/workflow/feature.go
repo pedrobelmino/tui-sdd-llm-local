@@ -257,8 +257,21 @@ func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, 
 		return ollama.TokenUsage{}, fmt.Errorf("task %s not found", taskID)
 	}
 
+	// Build a rich user message so the model has full context without needing
+	// to read spec/design/tasks via tools first.
+	var userParts []string
+	userParts = append(userParts, fmt.Sprintf("Feature: %s", feature))
+	userParts = append(userParts, fmt.Sprintf("Task to implement:\n%s", block))
+	if specData != nil {
+		userParts = append(userParts, fmt.Sprintf("spec.md:\n%s", truncate(string(specData), 3000)))
+	}
+	if designData, err := os.ReadFile(filepath.Join(featureDir, "design.md")); err == nil {
+		userParts = append(userParts, fmt.Sprintf("design.md:\n%s", truncate(string(designData), 2000)))
+	}
+	userParts = append(userParts, "Now implement this task using file tool calls. Read existing files if needed, then write/edit files to apply the changes.")
+
 	system := prompts.RunSystem(projectRoot, block, string(specData))
-	user := fmt.Sprintf("Implement task %s. Start making file changes now using tool calls. Do not explain — just call tools.", taskID)
+	user := strings.Join(userParts, "\n\n")
 
 	msgs := []ollama.ChatMessageWithTools{
 		{Role: "system", Content: system},

@@ -113,8 +113,8 @@ func TestChatWithTools_CompileTimeInterface(t *testing.T) {
 	}
 }
 
-func TestParseToolCall_ValidJSON(t *testing.T) {
-	text := "some preamble\n<tool_call>\n{\"tool\":\"write_file\",\"args\":{\"path\":\"foo.go\",\"content\":\"hello\"}}\n</tool_call>"
+func TestParseToolCall_TagFormat(t *testing.T) {
+	text := "preamble\n<tool_call>\n{\"tool\":\"write_file\",\"args\":{\"path\":\"foo.go\",\"content\":\"hello\"}}\n</tool_call>"
 	tc, ok := parseToolCall(text)
 	if !ok {
 		t.Fatal("expected tool call to be found")
@@ -124,6 +124,42 @@ func TestParseToolCall_ValidJSON(t *testing.T) {
 	}
 	if tc.Args["path"] != "foo.go" {
 		t.Errorf("path = %v", tc.Args["path"])
+	}
+}
+
+func TestParseToolCall_CodeBlockJSON(t *testing.T) {
+	// Model outputs tool call in a ```json code block (observed in the wild)
+	text := "```json\n{\"tool\":\"read_file\",\"args\":{\"path\":\".specs/spec.md\"}}\n```"
+	tc, ok := parseToolCall(text)
+	if !ok {
+		t.Fatal("expected code-block tool call to be found")
+	}
+	if tc.Tool != "read_file" {
+		t.Errorf("tool = %q", tc.Tool)
+	}
+}
+
+func TestParseToolCall_CodeBlockNoLang(t *testing.T) {
+	// No language hint
+	text := "```{\"tool\":\"list_dir\",\"args\":{\"path\":\".\"}}```"
+	tc, ok := parseToolCall(text)
+	if !ok {
+		t.Fatal("expected bare code-block tool call to be found")
+	}
+	if tc.Tool != "list_dir" {
+		t.Errorf("tool = %q", tc.Tool)
+	}
+}
+
+func TestParseToolCall_BareJSON(t *testing.T) {
+	// Bare JSON object in the response
+	text := "Here is the call: {\"tool\":\"create_dir\",\"args\":{\"path\":\"internal/foo\"}}"
+	tc, ok := parseToolCall(text)
+	if !ok {
+		t.Fatal("expected bare JSON tool call to be found")
+	}
+	if tc.Tool != "create_dir" {
+		t.Errorf("tool = %q", tc.Tool)
 	}
 }
 

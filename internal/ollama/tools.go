@@ -195,8 +195,57 @@ func (c *genClient) ChatWithTools(
 	return "", totalUsage, fmt.Errorf("tool-calling loop exceeded %d iterations", maxToolIter)
 }
 
-// parseToolCall extracts the first <tool_call>...</tool_call> block from text.
+// parseToolCall tries multiple formats the model might use for tool calls:
+//  1. <tool_call>{"tool":"...","args":{...}}</tool_call>   (preferred)
+//  2. ```json{"tool":"...","args":{...}}```                (code block, json tag)
+//  3. ```{"tool":"...","args":{...}}```                    (code block, no tag)
+//  4. {"tool":"...","args":{...}}                          (bare JSON anywhere)
 func parseToolCall(text string) (toolCallJSON, bool) {
+	// 1. Preferred: <tool_call> tags
+	if tc, ok := parseTaggedToolCall(text); ok {
+		return tc, true
+	}
+	// 2 & 3: code block with or without "json" language hint
+	for _, sep := range []string{"```json\n", "```json", "```\n", "```"} {
+		idx := strings.Index(text, sep)
+		if idx < 0 {
+			continue
+		}
+		after := text[idx+len(sep):]
+		endIdx := strings.Index(after, "```")
+		if endIdx < 0 {
+			continue
+		}
+		raw := strings.TrimSpace(after[:endIdx])
+		if tc, ok := unmarshalToolCall(raw); ok {
+			return tc, true
+		}
+	}
+	// 4. Bare JSON object anywhere in text
+	if start := strings.Index(text, `{"tool"`); start >= 0 {
+		// Find matching closing brace
+		depth, end := 0, -1
+		for i, ch := range text[start:] {
+			if ch == '{' {
+				depth++
+			} else if ch == '}' {
+				depth--
+				if depth == 0 {
+					end = start + i + 1
+					break
+				}
+			}
+		}
+		if end > start {
+			if tc, ok := unmarshalToolCall(text[start:end]); ok {
+				return tc, true
+			}
+		}
+	}
+	return toolCallJSON{}, false
+}
+
+func parseTaggedToolCall(text string) (toolCallJSON, bool) {
 	start := strings.Index(text, toolCallOpen)
 	if start < 0 {
 		return toolCallJSON{}, false
@@ -206,7 +255,10 @@ func parseToolCall(text string) (toolCallJSON, bool) {
 	if end < 0 {
 		return toolCallJSON{}, false
 	}
-	raw := strings.TrimSpace(inner[:end])
+	return unmarshalToolCall(strings.TrimSpace(inner[:end]))
+}
+
+func unmarshalToolCall(raw string) (toolCallJSON, bool) {
 	var tc toolCallJSON
 	if err := json.Unmarshal([]byte(raw), &tc); err != nil {
 		return toolCallJSON{}, false
