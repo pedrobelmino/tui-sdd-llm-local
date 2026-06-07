@@ -28,8 +28,9 @@ type KeyMap struct {
 	Implement    key.Binding
 	ImplementAll key.Binding
 	RunTask      key.Binding
-	Back       key.Binding
-	Submit     key.Binding
+	Back         key.Binding
+	Submit       key.Binding
+	CancelAction key.Binding
 }
 
 // DefaultKeyMap returns the tsll TUI keymap.
@@ -55,8 +56,9 @@ func DefaultKeyMap() KeyMap {
 		Implement:    key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "implement")),
 		ImplementAll: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "implement all")),
 		RunTask:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "run task")),
-		Back: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-		Submit: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
+		Back:         key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		Submit:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
+		CancelAction: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "cancel")),
 	}
 }
 
@@ -106,7 +108,8 @@ func HelpOverlay() string {
 		"  enter        submit",
 		"  j / k        scroll output (during generation)",
 		"  g / G        top / bottom of output",
-		"  esc          cancel / close",
+		"  esc / x      cancel running action",
+		"  esc          close when done",
 		"",
 		"Press ? to close",
 	}

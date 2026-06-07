@@ -146,10 +146,27 @@ func (m RootModel) handleActionKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 		return m.scrollActionToBottom(), nil
 	}
 
+	// Cancel running action with ESC or x.
 	if m.actionRunning {
+		if key.Matches(msg, m.keymap.Back) || key.Matches(msg, m.keymap.CancelAction) {
+			if m.actionCancel != nil {
+				m.actionCancel()
+				m.actionCancel = nil
+			}
+			m.actionCancelled = true
+			m.actionRunning = false
+			m.actionPhase = "cancelled"
+			m.actionLog += "\n\n✗ cancelled by user"
+			m = m.scrollActionToBottom()
+		}
 		return m, nil
 	}
+
 	if key.Matches(msg, m.keymap.Back) {
+		if m.actionCancel != nil {
+			m.actionCancel()
+			m.actionCancel = nil
+		}
 		m.screen = m.actionReturnScreen
 		if m.actionReturnScreen == ScreenFeatureDetail {
 			return m, m.loadFeatureTasksCmd(m.selectedFeature)
@@ -302,6 +319,10 @@ func (m RootModel) startAction(kind ActionKind, feature, brief, taskID string) (
 		m.statusMsg = "run tsll init first"
 		return m, nil
 	}
+	// Cancel any previous action still running.
+	if m.actionCancel != nil {
+		m.actionCancel()
+	}
 	returnScreen := m.screen
 	if returnScreen == ScreenForm {
 		returnScreen = ScreenDashboard
@@ -309,30 +330,40 @@ func (m RootModel) startAction(kind ActionKind, feature, brief, taskID string) (
 	m.actionReturnScreen = returnScreen
 	m.screen = ScreenAction
 	m.actionRunning = true
+	m.actionCancelled = false
 	m.actionKind = kind
 	m.actionTaskID = taskID
 	m.pendingFeature = feature
 	m.selectedFeature = feature
 	m.actionLog = ""
+	m.actionPhase = "waiting"
 	m.actionScrollLine = 0
 	m.actionFollowTail = true
+	m.actionSpinner = 0
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.actionCancel = cancel
 
 	ch := make(chan tea.Msg, 64)
 	m.actionCh = ch
 
-	go runWorkflow(kind, m.project.Root, feature, brief, taskID, ch)
+	go runWorkflow(ctx, kind, m.project.Root, feature, brief, taskID, ch)
 
 	return m, tea.Batch(waitActionMsg(ch), actionTickCmd())
 }
 
-func runWorkflow(kind ActionKind, root, feature, brief, taskID string, ch chan<- tea.Msg) {
+func runWorkflow(ctx context.Context, kind ActionKind, root, feature, brief, taskID string, ch chan<- tea.Msg) {
 	defer close(ch)
 	svc := workflow.New()
-	ctx := context.Background()
 
 	var usage ollama.TokenUsage
 	var err error
-	onChunk := func(s string) { ch <- ActionChunkMsg{Text: s} }
+	onChunk := func(s string) {
+		select {
+		case ch <- ActionChunkMsg{Text: s}:
+		case <-ctx.Done():
+		}
+	}
 
 	switch kind {
 	case ActionSpecify:
@@ -384,27 +415,88 @@ func (m RootModel) renderForm(width, height int) string {
 }
 
 func (m RootModel) renderAction(width, height int) string {
-	title := "Working..."
+	feature := m.selectedFeature
+	if feature == "" {
+		feature = m.pendingFeature
+	}
+
+	var baseTitle string
 	switch m.actionKind {
 	case ActionSpecify:
-		title = "Generating spec: " + m.pendingFeature
+		baseTitle = "spec: " + feature
 	case ActionDesign:
-		title = "Generating design: " + m.selectedFeature
+		baseTitle = "design: " + feature
 	case ActionTasks:
-		title = "Generating tasks: " + m.selectedFeature
+		baseTitle = "tasks: " + feature
 	case ActionImplement:
-		title = "Implementing: " + m.selectedFeature
+		baseTitle = "implement: " + feature
 	case ActionRun:
-		title = fmt.Sprintf("Running %s on %s", m.actionTaskID, m.selectedFeature)
+		baseTitle = fmt.Sprintf("run %s · %s", m.actionTaskID, feature)
+	default:
+		baseTitle = feature
 	}
-	if !m.actionRunning {
+
+	var title string
+	switch {
+	case m.actionCancelled:
+		title = "✗ cancelled — " + baseTitle
+	case !m.actionRunning && m.actionPhase == "done":
+		title = "✓ done — esc to close"
+	case !m.actionRunning && m.actionPhase == "error":
+		title = "✗ error — esc to close"
+	case !m.actionRunning:
 		title = "Done — esc to close"
+	default:
+		spin := spinnerFrames[m.actionSpinner%len(spinnerFrames)]
+		phaseLabel := phaseLabel(m.actionPhase)
+		title = spin + " " + baseTitle + " · " + phaseLabel
 	}
+
 	log := m.actionLog
 	if log == "" && m.actionRunning {
 		log = "Waiting for model..."
 	}
 	return ui.PanelViewport(title, log, width-4, height, m.actionScrollForRender())
+}
+
+// detectPhase infers the current workflow phase from a streaming chunk.
+func detectPhase(chunk, current string) string {
+	t := strings.TrimSpace(chunk)
+	switch {
+	case strings.HasPrefix(t, "🔧"):
+		return "tool-call"
+	case strings.HasPrefix(t, "✓"):
+		return "tool-done"
+	case strings.HasPrefix(t, "---"):
+		return "task-start"
+	case t != "":
+		return "generating"
+	}
+	return current
+}
+
+// phaseLabel returns a short human-readable label for an action phase.
+func phaseLabel(phase string) string {
+	switch phase {
+	case "waiting":
+		return "waiting for model…"
+	case "generating":
+		return "generating"
+	case "tool-call":
+		return "calling tool"
+	case "tool-done":
+		return "tool done"
+	case "task-start":
+		return "next task"
+	case "done":
+		return "done"
+	case "error":
+		return "error"
+	case "cancelled":
+		return "cancelled"
+	default:
+		return phase
+	}
 }
 
 func (m RootModel) renderStatusBanner(width int) string {

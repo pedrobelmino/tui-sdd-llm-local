@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/tui/views"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/ui"
 )
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 const actionScrollInterval = 200 * time.Millisecond
 
@@ -68,13 +71,17 @@ type RootModel struct {
 	textArea         textarea.Model
 
 	actionRunning      bool
+	actionCancelled    bool
 	actionKind         ActionKind
 	actionTaskID       string
+	actionPhase        string // current phase label shown in title
 	actionLog          string
 	actionScrollLine   int
 	actionFollowTail   bool
 	actionCh           <-chan tea.Msg
+	actionCancel       context.CancelFunc // nil when no action running
 	actionReturnScreen Screen
+	actionSpinner      int // index into spinnerFrames
 
 	ollama  ollama.Snapshot
 	gpu     gpu.Snapshot
@@ -228,6 +235,7 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ActionChunkMsg:
 		m.actionLog += msg.Text
+		m.actionPhase = detectPhase(msg.Text, m.actionPhase)
 		if m.actionFollowTail {
 			m = m.scrollActionToBottom()
 		} else {
@@ -238,15 +246,23 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case ActionFinishedMsg:
+		// Ignore finish messages from a cancelled action.
+		if m.actionCancelled {
+			return m, nil
+		}
 		m.actionRunning = false
+		m.actionCancel = nil
+		m.actionPhase = ""
 		if msg.Err != nil {
 			m.statusMsg = msg.Err.Error()
 			m.actionLog += "\n\n✗ " + msg.Err.Error()
+			m.actionPhase = "error"
 		} else {
 			m.statusMsg = ""
 			m.tokens.Add(msg.Usage.PromptTokens, msg.Usage.CompletionTokens)
 			m.actionLog += fmt.Sprintf("\n\n✓ done (%d+%d tokens)",
 				msg.Usage.PromptTokens, msg.Usage.CompletionTokens)
+			m.actionPhase = "done"
 		}
 		m = m.scrollActionToBottom()
 		m.selectedFeature = msg.Feature
@@ -258,6 +274,7 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ActionTickMsg:
 		if m.actionRunning {
+			m.actionSpinner = (m.actionSpinner + 1) % len(spinnerFrames)
 			return m, actionTickCmd()
 		}
 	}
@@ -289,7 +306,11 @@ func (m RootModel) View() string {
 		footer = "enter: submit  esc: cancel"
 	case ScreenAction:
 		main = m.renderAction(w, mainH)
-		footer = "j/k: scroll │ g/G: top/bottom │ esc: back"
+		if m.actionRunning {
+			footer = "j/k: scroll │ g/G: top/bottom │ esc/x: cancel"
+		} else {
+			footer = "j/k: scroll │ g/G: top/bottom │ esc: close"
+		}
 	case ScreenFeatureDetail:
 		main = m.renderFeatureDetailBody(w, mainH)
 		footer = "esc: back │ e: run task │ a: impl all │ s/d/t: spec/design/tasks"

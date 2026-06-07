@@ -201,18 +201,19 @@ func TestModel_ActionScreenShowsFooterMonitor(t *testing.T) {
 	}
 
 	out := m.View()
+	// New title format: "⠋ spec: landing-page · <phase>"
 	for _, want := range []string{
 		"Monitor", "qwen2.5-coder", "GPU AMD 40%", "CPU 22%", "MEM 50%", "Ld 1.2",
-		"Generating spec: landing-page",
+		"spec: landing-page",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("action view missing %q:\n%s", want, out)
 		}
 	}
-	genIdx := strings.Index(out, "Generating spec")
+	specIdx := strings.Index(out, "spec: landing-page")
 	monIdx := strings.LastIndex(out, "Monitor")
-	if genIdx < 0 || monIdx < 0 || genIdx > monIdx {
-		t.Fatalf("footer monitor should appear after main content (gen=%d mon=%d)", genIdx, monIdx)
+	if specIdx < 0 || monIdx < 0 || specIdx > monIdx {
+		t.Fatalf("footer monitor should appear after main content (spec=%d mon=%d)", specIdx, monIdx)
 	}
 }
 
@@ -339,5 +340,104 @@ func TestModel_HeaderShowsSystemAndGPU(t *testing.T) {
 	}
 	if !strings.Contains(title, "AMD") {
 		t.Errorf("expected AMD vendor in header: %s", title)
+	}
+}
+
+func TestModel_CancelActionWithESC(t *testing.T) {
+	cancelled := false
+	m := newTestModel()
+	m.screen = ScreenAction
+	m.actionRunning = true
+	m.actionKind = ActionSpecify
+	m.pendingFeature = "auth"
+	m.actionCancel = func() { cancelled = true }
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m2 := updated.(RootModel)
+	if !cancelled {
+		t.Fatal("cancel func not called on ESC")
+	}
+	if m2.actionRunning {
+		t.Fatal("actionRunning should be false after cancel")
+	}
+	if !m2.actionCancelled {
+		t.Fatal("actionCancelled should be true")
+	}
+	if !strings.Contains(m2.actionLog, "cancelled") {
+		t.Fatalf("actionLog should mention cancelled: %q", m2.actionLog)
+	}
+}
+
+func TestModel_CancelActionWithX(t *testing.T) {
+	cancelled := false
+	m := newTestModel()
+	m.screen = ScreenAction
+	m.actionRunning = true
+	m.actionKind = ActionTasks
+	m.selectedFeature = "auth"
+	m.actionCancel = func() { cancelled = true }
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m2 := updated.(RootModel)
+	if !cancelled {
+		t.Fatal("cancel func not called on x")
+	}
+	if m2.actionRunning {
+		t.Fatal("actionRunning should be false after cancel")
+	}
+}
+
+func TestDetectPhase_Classifications(t *testing.T) {
+	cases := []struct {
+		chunk   string
+		current string
+		want    string
+	}{
+		{"🔧 write_file(path=foo.go)\n", "waiting", "tool-call"},
+		{"   ✓ wrote foo.go\n", "tool-call", "tool-done"},
+		{"--- Implementing T1: setup ---\n", "waiting", "task-start"},
+		{"package main\n", "waiting", "generating"},
+		{"", "generating", "generating"},
+		{"   ", "tool-done", "tool-done"},
+	}
+	for _, tc := range cases {
+		got := detectPhase(tc.chunk, tc.current)
+		if got != tc.want {
+			t.Errorf("detectPhase(%q, %q) = %q, want %q", tc.chunk, tc.current, got, tc.want)
+		}
+	}
+}
+
+func TestModel_ActionSpinnerAdvancesOnTick(t *testing.T) {
+	m := newTestModel()
+	m.screen = ScreenAction
+	m.actionRunning = true
+	m.actionSpinner = 0
+
+	updated, _ := m.Update(ActionTickMsg{})
+	m2 := updated.(RootModel)
+	if m2.actionSpinner != 1 {
+		t.Fatalf("spinner should advance on tick, got %d", m2.actionSpinner)
+	}
+}
+
+func TestModel_ActionTitleShowsSpinnerAndPhase(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	m := newTestModel()
+	m.width = 100
+	m.height = 30
+	m.screen = ScreenAction
+	m.actionRunning = true
+	m.actionKind = ActionImplement
+	m.selectedFeature = "landing-page"
+	m.actionPhase = "tool-call"
+	m.actionSpinner = 2
+
+	out := m.View()
+	if !strings.Contains(out, "implement: landing-page") {
+		t.Fatalf("title missing feature name:\n%s", out)
+	}
+	if !strings.Contains(out, "calling tool") {
+		t.Fatalf("title missing phase label:\n%s", out)
 	}
 }
