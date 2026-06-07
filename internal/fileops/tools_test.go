@@ -49,6 +49,39 @@ func TestReadFile_MissingReturnsError(t *testing.T) {
 	}
 }
 
+func TestReadFile_DirectoryReturnsError(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "ui"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "index.html"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec := Executor(root)
+	result := exec("read_file", map[string]any{"path": "internal"})
+	if !strings.HasPrefix(result, "ERROR") {
+		t.Fatalf("expected ERROR for directory, got: %s", result)
+	}
+	if !strings.Contains(result, "is a directory") || !strings.Contains(result, "list_dir") {
+		t.Fatalf("unexpected read_file(directory) result: %q", result)
+	}
+	if !strings.Contains(result, "ui/") || !strings.Contains(result, "index.html") {
+		t.Fatalf("expected directory entries in result: %q", result)
+	}
+}
+
+func TestWriteFile_RejectsTruncatedGo(t *testing.T) {
+	root := t.TempDir()
+	exec := Executor(root)
+	result := exec("write_file", map[string]any{
+		"path":    "src/main.go",
+		"content": "package main\n\nimport (\n",
+	})
+	if !strings.HasPrefix(result, "ERROR") {
+		t.Fatalf("expected truncated Go rejection, got: %s", result)
+	}
+}
+
 func TestEditFile_ReplacesExactMatch(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "src.go")

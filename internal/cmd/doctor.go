@@ -24,12 +24,12 @@ var doctorCmd = &cobra.Command{
 		client := ollama.NewClient(cfg.OllamaHost)
 		if client.Reachable(context.Background()) {
 			printOK("Ollama reachable at " + cfg.OllamaHost)
-			snap := ollama.FetchSnapshot(context.Background(), client)
-			if snap.DefaultModelMissing {
-				fmt.Fprintf(os.Stderr, "✗ default model %s not pulled — run: ollama pull %s\n", ollama.DefaultModel, ollama.DefaultModel)
+			snap := ollama.FetchSnapshot(context.Background(), client, cfg.Model)
+			if snap.ModelMissing {
+				fmt.Fprintf(os.Stderr, "✗ model %s not pulled — run: ollama pull %s\n", cfg.Model, cfg.Model)
 				ok = false
 			} else {
-				printOK("model " + ollama.DefaultModel + " available")
+				printOK("model " + cfg.Model + " available")
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "✗ Ollama unreachable at %s\n", cfg.OllamaHost)

@@ -17,9 +17,10 @@ type ModelsData struct {
 	Height              int
 	Tags                []ollama.TagModel
 	Running             []ollama.RunningModel
-	Reachable           bool
-	DefaultModelMissing bool
-	Error               string
+	Reachable      bool
+	ModelMissing   bool
+	ConfiguredModel string
+	Error          string
 }
 
 const (
@@ -40,8 +41,12 @@ func RenderModels(d ModelsData) string {
 		parts = append(parts, ui.BannerError(ollamaUnreachableMsg, width))
 	}
 
-	if d.DefaultModelMissing && d.Reachable {
-		parts = append(parts, formatWarning(fmt.Sprintf(defaultModelWarnFmt, ollama.DefaultModel, ollama.DefaultModel)))
+	if d.ModelMissing && d.Reachable {
+		model := d.ConfiguredModel
+		if model == "" {
+			model = ollama.DefaultModel
+		}
+		parts = append(parts, formatWarning(fmt.Sprintf(defaultModelWarnFmt, model, model)))
 	}
 
 	installed := buildInstalledTable(d.Tags, width)

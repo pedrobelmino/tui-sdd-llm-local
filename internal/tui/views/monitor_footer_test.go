@@ -13,11 +13,11 @@ import (
 func TestRenderMonitorFooter_SingleLineSummary(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	out := RenderMonitorFooter(FooterMonitorData{
-		Width: 120,
+		Width: 120, ConfiguredModel: "qwen2.5-coder:3b",
 		Ollama: ollama.Snapshot{
 			Reachable: true,
 			Running: []ollama.RunningModel{{
-				Name: "qwen2.5-coder:latest", SizeVRAM: 2408937472,
+				Name: "qwen2.5-coder:3b", SizeVRAM: 2408937472,
 			}},
 		},
 		GPU: gpu.Snapshot{
@@ -48,7 +48,7 @@ func TestRenderMonitorFooter_SingleLineSummary(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"qwen2.5-coder",
+		"qwen2.5-coder:3b",
 		"GPU AMD 55%",
 		"Tok 1.2k+800",
 		"CPU 33%",

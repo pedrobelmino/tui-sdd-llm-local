@@ -19,6 +19,9 @@ const (
 	FormFeatureBrief
 	FormInitName
 	FormInitVision
+	FormQuickTask
+	FormAsk
+	FormActionReply
 )
 
 // ActionKind identifies a running workflow action.
@@ -31,4 +34,6 @@ const (
 	ActionTasks
 	ActionImplement
 	ActionRun
+	ActionQuickTask
+	ActionAsk
 )

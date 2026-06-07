@@ -112,13 +112,13 @@ func TestRenderModels_DefaultModelWarning(t *testing.T) {
 	got := RenderModels(ModelsData{
 		Width:               testWidth,
 		Reachable:           true,
-		DefaultModelMissing: true,
+		ModelMissing: true, ConfiguredModel: "qwen2.5-coder:3b",
 		Tags: []ollama.TagModel{
 			testTag("llama3.2:latest", 2019393189),
 		},
 	})
 
-	want := "! model not pulled: qwen2.5-coder — run: ollama pull qwen2.5-coder"
+	want := "! model not pulled: qwen2.5-coder:3b — run: ollama pull qwen2.5-coder:3b"
 	if !strings.Contains(got, want) {
 		t.Fatalf("expected default model warning %q in output:\n%s", want, got)
 	}

@@ -187,7 +187,7 @@ func TestModel_ActionScreenShowsFooterMonitor(t *testing.T) {
 	m.pendingFeature = "landing-page"
 	m.ollama = ollama.Snapshot{
 		Reachable: true,
-		Running: []ollama.RunningModel{{Name: "qwen2.5-coder:latest", SizeVRAM: 2408937472}},
+		Running: []ollama.RunningModel{{Name: "qwen2.5-coder:3b", SizeVRAM: 2408937472}},
 	}
 	m.gpu = gpu.Snapshot{
 		Available: true,
@@ -203,7 +203,7 @@ func TestModel_ActionScreenShowsFooterMonitor(t *testing.T) {
 	out := m.View()
 	// New title format: "⠋ spec: landing-page · <phase>"
 	for _, want := range []string{
-		"Monitor", "qwen2.5-coder", "GPU AMD 40%", "CPU 22%", "MEM 50%", "Ld 1.2",
+		"Monitor", "qwen2.5-coder:3b", "GPU AMD 40%", "CPU 22%", "MEM 50%", "Ld 1.2",
 		"spec: landing-page",
 	} {
 		if !strings.Contains(out, want) {

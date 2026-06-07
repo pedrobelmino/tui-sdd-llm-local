@@ -11,12 +11,12 @@ import (
 const tagsFixture = `{
 	"models": [
 		{
-			"name": "qwen2.5-coder:latest",
-			"model": "qwen2.5-coder:latest",
+			"name": "qwen2.5-coder:3b",
+			"model": "qwen2.5-coder:3b",
 			"modified_at": "2024-11-11T09:14:17.071291239-08:00",
-			"size": 4683087332,
+			"size": 1929912432,
 			"details": {
-				"parameter_size": "7.6B",
+				"parameter_size": "3B",
 				"quantization_level": "Q4_K_M"
 			}
 		}
@@ -70,8 +70,8 @@ func TestTags(t *testing.T) {
 	if len(tags) != 1 {
 		t.Fatalf("len(tags) = %d, want 1", len(tags))
 	}
-	if tags[0].Name != "qwen2.5-coder:latest" {
-		t.Errorf("name = %q, want qwen2.5-coder:latest", tags[0].Name)
+	if tags[0].Name != "qwen2.5-coder:3b" {
+		t.Errorf("name = %q, want qwen2.5-coder:3b", tags[0].Name)
 	}
 }
 
@@ -111,7 +111,7 @@ func TestFetchSnapshotSuccess(t *testing.T) {
 	defer srv.Close()
 
 	before := time.Now()
-	snap := FetchSnapshot(context.Background(), NewClient(srv.URL))
+	snap := FetchSnapshot(context.Background(), NewClient(srv.URL), DefaultModel)
 
 	if !snap.Reachable {
 		t.Error("Reachable = false, want true")
@@ -125,8 +125,8 @@ func TestFetchSnapshotSuccess(t *testing.T) {
 	if len(snap.Running) != 1 {
 		t.Fatalf("len(Running) = %d, want 1", len(snap.Running))
 	}
-	if snap.DefaultModelMissing {
-		t.Error("DefaultModelMissing = true, want false")
+	if snap.ModelMissing {
+		t.Error("ModelMissing = true, want false")
 	}
 	if snap.FetchedAt.Before(before) {
 		t.Errorf("FetchedAt = %v, want >= %v", snap.FetchedAt, before)
@@ -134,7 +134,7 @@ func TestFetchSnapshotSuccess(t *testing.T) {
 }
 
 func TestFetchSnapshotUnreachable(t *testing.T) {
-	snap := FetchSnapshot(context.Background(), NewClient("http://127.0.0.1:1"))
+	snap := FetchSnapshot(context.Background(), NewClient("http://127.0.0.1:1"), DefaultModel)
 
 	if snap.Reachable {
 		t.Error("Reachable = true, want false")
@@ -153,7 +153,7 @@ func TestFetchSnapshotUnreachable(t *testing.T) {
 	}
 }
 
-func TestDefaultModelMissing(t *testing.T) {
+func TestModelMissing(t *testing.T) {
 	const tagsWithoutDefault = `{
 		"models": [
 			{
@@ -172,9 +172,29 @@ func TestDefaultModelMissing(t *testing.T) {
 	srv := newTestServer(t, tagsWithoutDefault, `{"models":[]}`)
 	defer srv.Close()
 
-	snap := FetchSnapshot(context.Background(), NewClient(srv.URL))
-	if !snap.DefaultModelMissing {
-		t.Error("DefaultModelMissing = false, want true")
+	snap := FetchSnapshot(context.Background(), NewClient(srv.URL), DefaultModel)
+	if !snap.ModelMissing {
+		t.Error("ModelMissing = false, want true")
+	}
+}
+
+func TestHasModel_ExactTag(t *testing.T) {
+	tags := []TagModel{{Name: "qwen2.5-coder:3b"}}
+	if !HasModel(tags, "qwen2.5-coder:3b") {
+		t.Fatal("expected exact tag match")
+	}
+	if HasModel(tags, "qwen2.5-coder:latest") {
+		t.Fatal("different tag should not match")
+	}
+}
+
+func TestHasModel_BaseName(t *testing.T) {
+	tags := []TagModel{{Name: "qwen2.5-coder:latest"}}
+	if !HasModel(tags, "qwen2.5-coder") {
+		t.Fatal("base name should match tagged variant")
+	}
+	if HasModel(tags, "qwen2.5-coder:3b") {
+		t.Fatal("specific tag should not match different variant")
 	}
 }
 

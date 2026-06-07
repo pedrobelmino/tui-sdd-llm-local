@@ -57,17 +57,27 @@ func (m RootModel) handleFeaturesKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 	case key.Matches(msg, m.keymap.GenDesign):
 		if len(m.features) > 0 {
 			name := m.sortedFeatureName()
-			return m.startAction(ActionDesign, name, "", "")
+			return m.startAction(ActionDesign, name, "", "", "")
 		}
 	case key.Matches(msg, m.keymap.GenTasks):
 		if len(m.features) > 0 {
 			name := m.sortedFeatureName()
-			return m.startAction(ActionTasks, name, "", "")
+			return m.startAction(ActionTasks, name, "", "", "")
+		}
+	case key.Matches(msg, m.keymap.QuickTask):
+		if len(m.features) > 0 {
+			m.pendingFeature = m.sortedFeatureName()
+		}
+		m = m.openFormWithReturn(FormQuickTask, ScreenDashboard)
+	case key.Matches(msg, m.keymap.Ask):
+		if len(m.features) > 0 {
+			m.pendingFeature = m.sortedFeatureName()
+			m = m.openFormWithReturn(FormAsk, ScreenDashboard)
 		}
 	case key.Matches(msg, m.keymap.Implement):
 		if len(m.features) > 0 {
 			name := m.sortedFeatureName()
-			return m.startAction(ActionImplement, name, "", "")
+			return m.startAction(ActionImplement, name, "", "", "")
 		}
 	}
 	return m, nil
@@ -90,15 +100,23 @@ func (m RootModel) handleDetailKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 		m.pendingFeature = m.selectedFeature
 		m = m.openFormWithReturn(FormFeatureBrief, ScreenFeatureDetail)
 	case key.Matches(msg, m.keymap.GenDesign):
-		return m.startAction(ActionDesign, m.selectedFeature, "", "")
+		return m.startAction(ActionDesign, m.selectedFeature, "", "", "")
 	case key.Matches(msg, m.keymap.GenTasks):
-		return m.startAction(ActionTasks, m.selectedFeature, "", "")
+		return m.startAction(ActionTasks, m.selectedFeature, "", "", "")
+	case key.Matches(msg, m.keymap.QuickTask):
+		m.pendingFeature = m.selectedFeature
+		m = m.openFormWithReturn(FormQuickTask, ScreenFeatureDetail)
+		return m, nil
+	case key.Matches(msg, m.keymap.Ask):
+		m.pendingFeature = m.selectedFeature
+		m = m.openFormWithReturn(FormAsk, ScreenFeatureDetail)
+		return m, nil
 	case key.Matches(msg, m.keymap.ImplementAll):
-		return m.startAction(ActionImplement, m.selectedFeature, "", "")
+		return m.startAction(ActionImplement, m.selectedFeature, "", "", "")
 	case key.Matches(msg, m.keymap.RunTask), key.Matches(msg, m.keymap.Open):
 		if len(m.featureTasks) > 0 {
 			id := m.featureTasks[m.taskCursor].ID
-			return m.startAction(ActionRun, m.selectedFeature, "", id)
+			return m.startAction(ActionRun, m.selectedFeature, "", id, "")
 		}
 	}
 	return m, nil
@@ -144,6 +162,13 @@ func (m RootModel) handleActionKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 		return m, nil
 	case msg.String() == "G":
 		return m.scrollActionToBottom(), nil
+	case key.Matches(msg, m.keymap.CopyLog):
+		if msg, err := copyActionLog(m.actionLog); err != nil {
+			m.statusMsg = err.Error()
+		} else {
+			m.statusMsg = msg
+		}
+		return m, nil
 	}
 
 	// Cancel running action with ESC or x.
@@ -159,6 +184,11 @@ func (m RootModel) handleActionKey(msg tea.KeyMsg) (RootModel, tea.Cmd) {
 			m.actionLog += "\n\n✗ cancelled by user"
 			m = m.scrollActionToBottom()
 		}
+		return m, nil
+	}
+
+	if m.actionNeedsInput && key.Matches(msg, m.keymap.Submit) {
+		m = m.openFormWithReturn(FormActionReply, ScreenAction)
 		return m, nil
 	}
 
@@ -197,7 +227,7 @@ func (m RootModel) submitForm() (RootModel, tea.Cmd) {
 		feature := m.pendingFeature
 		m.screen = ScreenDashboard
 		m.formKind = FormNone
-		return m.startAction(ActionSpecify, feature, brief, "")
+		return m.startAction(ActionSpecify, feature, brief, "", "")
 
 	case FormInitName:
 		name := strings.TrimSpace(m.textInput.Value())
@@ -231,6 +261,43 @@ func (m RootModel) submitForm() (RootModel, tea.Cmd) {
 		m.statusMsg = "Project initialized — press 2 for Features"
 		m.activeView = ViewOverview
 		return m, loadProjectCmd()
+
+	case FormQuickTask:
+		req := strings.TrimSpace(m.textArea.Value())
+		if req == "" {
+			m.statusMsg = "quick task request required"
+			return m, nil
+		}
+		feature := strings.TrimSpace(m.pendingFeature)
+		m.screen = m.formReturnScreen
+		m.formKind = FormNone
+		return m.startAction(ActionQuickTask, feature, "", "", req)
+
+	case FormAsk:
+		question := strings.TrimSpace(m.textArea.Value())
+		if question == "" {
+			m.statusMsg = "question required"
+			return m, nil
+		}
+		feature := strings.TrimSpace(m.pendingFeature)
+		if feature == "" {
+			m.statusMsg = "select a feature first"
+			return m, nil
+		}
+		m.screen = m.formReturnScreen
+		m.formKind = FormNone
+		return m.startAction(ActionAsk, feature, "", "", question)
+
+	case FormActionReply:
+		answer := strings.TrimSpace(m.textArea.Value())
+		if answer == "" {
+			m.statusMsg = "reply required"
+			return m, nil
+		}
+		m.screen = ScreenAction
+		m.formKind = FormNone
+		prompt := "Model asked:\n" + m.actionQuestion + "\n\nUser answer:\n" + answer + "\n\nContinue with the implementation/workflow now."
+		return m.startAction(ActionQuickTask, m.selectedFeature, "", "", prompt)
 	}
 	return m, nil
 }
@@ -265,6 +332,22 @@ func (m RootModel) openFormWithReturn(kind FormKind, returnScreen Screen) RootMo
 		m.textArea.Focus()
 		m.textArea.SetValue("")
 		m.textArea.Placeholder = "Vision (1-2 sentences)..."
+	case FormQuickTask:
+		m.textArea.Focus()
+		m.textArea.SetValue("")
+		if m.pendingFeature != "" {
+			m.textArea.Placeholder = "Describe quick task for feature " + m.pendingFeature + "..."
+		} else {
+			m.textArea.Placeholder = "Describe a quick task..."
+		}
+	case FormAsk:
+		m.textArea.Focus()
+		m.textArea.SetValue("")
+		m.textArea.Placeholder = "Ask about " + m.pendingFeature + " (spec, design, tasks, tech stack)..."
+	case FormActionReply:
+		m.textArea.Focus()
+		m.textArea.SetValue("")
+		m.textArea.Placeholder = "Answer model question..."
 	}
 	return m
 }
@@ -314,7 +397,7 @@ func (m RootModel) loadFeatureTasksCmd(feature string) tea.Cmd {
 	}
 }
 
-func (m RootModel) startAction(kind ActionKind, feature, brief, taskID string) (RootModel, tea.Cmd) {
+func (m RootModel) startAction(kind ActionKind, feature, brief, taskID, prompt string) (RootModel, tea.Cmd) {
 	if !m.project.Valid {
 		m.statusMsg = "run tsll init first"
 		return m, nil
@@ -333,9 +416,12 @@ func (m RootModel) startAction(kind ActionKind, feature, brief, taskID string) (
 	m.actionCancelled = false
 	m.actionKind = kind
 	m.actionTaskID = taskID
+	m.actionPrompt = prompt
 	m.pendingFeature = feature
 	m.selectedFeature = feature
 	m.actionLog = ""
+	m.actionNeedsInput = false
+	m.actionQuestion = ""
 	m.actionPhase = "waiting"
 	m.actionScrollLine = 0
 	m.actionFollowTail = true
@@ -347,16 +433,17 @@ func (m RootModel) startAction(kind ActionKind, feature, brief, taskID string) (
 	ch := make(chan tea.Msg, 64)
 	m.actionCh = ch
 
-	go runWorkflow(ctx, kind, m.project.Root, feature, brief, taskID, ch)
+	go runWorkflow(ctx, kind, m.project.Root, feature, brief, taskID, prompt, ch)
 
 	return m, tea.Batch(waitActionMsg(ch), actionTickCmd())
 }
 
-func runWorkflow(ctx context.Context, kind ActionKind, root, feature, brief, taskID string, ch chan<- tea.Msg) {
+func runWorkflow(ctx context.Context, kind ActionKind, root, feature, brief, taskID, prompt string, ch chan<- tea.Msg) {
 	defer close(ch)
 	svc := workflow.New()
 
 	var usage ollama.TokenUsage
+	var output string
 	var err error
 	onChunk := func(s string) {
 		select {
@@ -376,12 +463,17 @@ func runWorkflow(ctx context.Context, kind ActionKind, root, feature, brief, tas
 		usage, err = svc.Implement(ctx, root, feature, onChunk)
 	case ActionRun:
 		usage, err = svc.Run(ctx, root, feature, taskID, onChunk)
+	case ActionQuickTask:
+		output, usage, err = svc.QuickTask(ctx, root, feature, prompt, onChunk)
+	case ActionAsk:
+		output, usage, err = svc.Ask(ctx, root, feature, prompt, onChunk)
 	}
 
 	ch <- ActionFinishedMsg{
 		Kind:    kind,
 		Feature: feature,
 		TaskID:  taskID,
+		Output:  output,
 		Usage:   usage,
 		Err:     err,
 	}
@@ -409,6 +501,19 @@ func (m RootModel) renderForm(width, height int) string {
 	case FormInitVision:
 		title = "Init project — vision: " + m.pendingInitName
 		body = m.textArea.View()
+	case FormQuickTask:
+		if m.pendingFeature != "" {
+			title = "Quick task: " + m.pendingFeature
+		} else {
+			title = "Quick task"
+		}
+		body = m.textArea.View()
+	case FormAsk:
+		title = "Ask: " + m.pendingFeature
+		body = m.textArea.View()
+	case FormActionReply:
+		title = "Reply to model"
+		body = m.textArea.View()
 	}
 	help := "enter: submit  esc: cancel"
 	return ui.Panel(title, body+"\n\n"+help, width-4, height)
@@ -432,6 +537,8 @@ func (m RootModel) renderAction(width, height int) string {
 		baseTitle = "implement: " + feature
 	case ActionRun:
 		baseTitle = fmt.Sprintf("run %s · %s", m.actionTaskID, feature)
+	case ActionAsk:
+		baseTitle = "ask: " + feature
 	default:
 		baseTitle = feature
 	}
@@ -504,9 +611,32 @@ func phaseLabel(phase string) string {
 		return "error"
 	case "cancelled":
 		return "cancelled"
+	case "awaiting-input":
+		return "awaiting input"
 	default:
 		return phase
 	}
+}
+
+// detectQuestionPrompt tries to detect when the model finished by asking for user input.
+func detectQuestionPrompt(text string) (string, bool) {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return "", false
+	}
+	l := strings.ToLower(t)
+	markers := []string{
+		"what should", "what would you like", "please provide",
+		"which file", "which path", "can you clarify", "could you clarify",
+		"how would you like", "what should be the name and location",
+		"to proceed", "i need",
+	}
+	for _, m := range markers {
+		if strings.Contains(l, m) && strings.Contains(t, "?") {
+			return t, true
+		}
+	}
+	return "", false
 }
 
 func (m RootModel) renderStatusBanner(width int) string {

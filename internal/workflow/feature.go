@@ -24,11 +24,12 @@ type Service struct {
 }
 
 type featureContext struct {
-	Feature    string
-	FeatureDir string
-	Spec       string
-	Design     string
-	Tasks      string
+	Feature      string
+	FeatureDir   string
+	Spec         string
+	Design       string
+	Tasks        string
+	ProjectStack string
 }
 
 // New creates a workflow service with config defaults.
@@ -52,7 +53,7 @@ func (s *Service) toolCtx(ctx context.Context) context.Context {
 	ctx = ollama.WithModel(ctx, s.cfg.Model)
 	if s.cfg.FastMode {
 		// Lower loop cap in fast mode to reduce tail latency on bad loops.
-		ctx = ollama.WithToolLoopLimit(ctx, 12)
+		ctx = ollama.WithToolLoopLimit(ctx, 16)
 	}
 	return ctx
 }
@@ -78,7 +79,20 @@ func (s *Service) Specify(ctx context.Context, projectRoot, feature, brief strin
 	}
 
 	system := prompts.SpecifySystem(projectRoot)
+	featureDir := filepath.Join(projectRoot, ".specs/features", feature)
+	specPath := filepath.Join(featureDir, "spec.md")
+	var existingSpec string
+	if data, err := os.ReadFile(specPath); err == nil {
+		existingSpec = string(data)
+		if onChunk != nil {
+			onChunk("\n📄 existing spec.md found — evolving current document\n")
+		}
+	}
+
 	user := fmt.Sprintf("Feature name: %s\n\nDescription:\n%s\n\nGenerate complete spec.md now.", feature, brief)
+	if existingSpec != "" {
+		user += "\n\nCurrent spec.md (evolve this document):\n" + truncate(existingSpec, 7000)
+	}
 
 	out, usage, err := s.client.ChatStream(ctx, ollama.ChatRequest{
 		Model: s.cfg.Model,
@@ -91,11 +105,9 @@ func (s *Service) Specify(ctx context.Context, projectRoot, feature, brief strin
 		return usage, err
 	}
 
-	featureDir := filepath.Join(projectRoot, ".specs/features", feature)
 	if err := os.MkdirAll(featureDir, 0o755); err != nil {
 		return usage, err
 	}
-	specPath := filepath.Join(featureDir, "spec.md")
 	if err := os.WriteFile(specPath, []byte(templates.Spec(feature, out)), 0o644); err != nil {
 		return usage, err
 	}
@@ -119,6 +131,13 @@ func (s *Service) Design(ctx context.Context, projectRoot, feature string, onChu
 	}
 
 	user := fmt.Sprintf("Feature: %s\n\nspec.md:\n%s\n\nGenerate complete design.md now.", feature, string(specData))
+	designPath := filepath.Join(featureDir, "design.md")
+	if existingDesign, err := os.ReadFile(designPath); err == nil {
+		if onChunk != nil {
+			onChunk("\n📄 existing design.md found — evolving current document\n")
+		}
+		user += "\n\ndesign.md (current version to evolve):\n" + truncate(string(existingDesign), 7000)
+	}
 	if contextData, err := os.ReadFile(filepath.Join(featureDir, "context.md")); err == nil {
 		user += "\n\ncontext.md:\n" + string(contextData)
 	}
@@ -138,7 +157,6 @@ func (s *Service) Design(ctx context.Context, projectRoot, feature string, onChu
 		return usage, err
 	}
 
-	designPath := filepath.Join(featureDir, "design.md")
 	if err := os.WriteFile(designPath, []byte(templates.Design(feature, out)), 0o644); err != nil {
 		return usage, err
 	}
@@ -162,6 +180,13 @@ func (s *Service) Tasks(ctx context.Context, projectRoot, feature string, onChun
 
 	system := prompts.TasksSystem(projectRoot)
 	user := fmt.Sprintf("Feature: %s\n\nspec.md:\n%s\n\nGenerate complete tasks.md now.", feature, string(specData))
+	tasksPath := filepath.Join(projectRoot, ".specs/features", feature, "tasks.md")
+	if existingTasks, err := os.ReadFile(tasksPath); err == nil {
+		if onChunk != nil {
+			onChunk("\n📄 existing tasks.md found — evolving current document\n")
+		}
+		user += "\n\ntasks.md (current version to evolve):\n" + truncate(string(existingTasks), 7000)
+	}
 
 	out, usage, err := s.client.ChatStream(ctx, ollama.ChatRequest{
 		Model: s.cfg.Model,
@@ -174,7 +199,6 @@ func (s *Service) Tasks(ctx context.Context, projectRoot, feature string, onChun
 		return usage, err
 	}
 
-	tasksPath := filepath.Join(projectRoot, ".specs/features", feature, "tasks.md")
 	if err := os.WriteFile(tasksPath, []byte(templates.Tasks(out)), 0o644); err != nil {
 		return usage, err
 	}
@@ -199,15 +223,12 @@ func (s *Service) Implement(ctx context.Context, projectRoot, feature string, on
 	}
 	s.warmModel(ctx)
 
-	// If tasks exist, execute only pending tasks with shared cached context.
-	tasks := project.ParseTasksContent(fc.Tasks)
+	// If tasks exist, execute pending code tasks one-by-one with shared cached context.
+	tasks := project.ImplementableTasks(project.ParseTasksContent(fc.Tasks))
 	if len(tasks) > 0 {
 		var total ollama.TokenUsage
 		var ran bool
 		for _, task := range tasks {
-			if task.Status == "Done" {
-				continue
-			}
 			ran = true
 			if onChunk != nil {
 				onChunk(fmt.Sprintf("\n\n--- Implementing %s: %s ---\n\n", task.ID, task.Title))
@@ -287,7 +308,7 @@ func (s *Service) runTaskWithContext(ctx context.Context, projectRoot string, fc
 	}
 
 	out, usage, err := s.client.ChatWithTools(
-		s.toolCtx(ctx), msgs,
+		ollama.WithMinFileWrites(s.toolCtx(ctx), estimateMinFileWrites(block)), msgs,
 		fileops.Definitions(),
 		fileops.Executor(projectRoot),
 		onChunk,
@@ -303,6 +324,70 @@ func (s *Service) runTaskWithContext(ctx context.Context, projectRoot string, fc
 	_ = state.AppendDecision(statePath, "Task "+taskID+" executed", truncate(out, 200), "tsll run from TUI/CLI")
 
 	return usage, nil
+}
+
+// Ask answers a read-only question about a feature using spec/design/tasks context.
+func (s *Service) Ask(ctx context.Context, projectRoot, feature, question string, onChunk func(string)) (string, ollama.TokenUsage, error) {
+	if !s.Reachable(ctx) {
+		return "", ollama.TokenUsage{}, fmt.Errorf("ollama not reachable at %s", s.cfg.OllamaHost)
+	}
+	if strings.TrimSpace(question) == "" {
+		return "", ollama.TokenUsage{}, fmt.Errorf("question required")
+	}
+
+	fc, err := s.loadFeatureContext(projectRoot, feature)
+	if err != nil {
+		return "", ollama.TokenUsage{}, err
+	}
+
+	system := prompts.AskSystem(projectRoot)
+	user := buildAskUserMsg(fc, question, s.cfg.FastMode)
+	out, usage, err := s.client.ChatStream(ctx, ollama.ChatRequest{
+		Model: s.cfg.Model,
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
+		},
+	}, onChunk)
+	if err != nil {
+		return out, usage, err
+	}
+	return out, usage, nil
+}
+
+// QuickTask executes an ad-hoc request, optionally scoped to a feature.
+// It uses the same file tools loop used by run/implement.
+func (s *Service) QuickTask(ctx context.Context, projectRoot, feature, request string, onChunk func(string)) (string, ollama.TokenUsage, error) {
+	if !s.Reachable(ctx) {
+		return "", ollama.TokenUsage{}, fmt.Errorf("ollama not reachable at %s", s.cfg.OllamaHost)
+	}
+	if strings.TrimSpace(request) == "" {
+		return "", ollama.TokenUsage{}, fmt.Errorf("quick task request required")
+	}
+	if s.cfg.FastMode && onChunk != nil {
+		onChunk("⚡ fast mode enabled (compact context)\n")
+	}
+	s.warmModel(ctx)
+
+	// Build base prompt; if feature exists, preload its context.
+	user := "Quick task request:\n" + request + "\n\nApply changes using file tools."
+	if strings.TrimSpace(feature) != "" {
+		if fc, err := s.loadFeatureContext(projectRoot, feature); err == nil {
+			user = buildImplementUserMsg(fc, "", s.cfg.FastMode) + "\n\n---\n" + user
+		}
+	}
+
+	msgs := []ollama.ChatMessageWithTools{
+		{Role: "system", Content: prompts.ImplementSystem(projectRoot)},
+		{Role: "user", Content: user},
+	}
+	out, usage, err := s.client.ChatWithTools(
+		s.toolCtx(ctx), msgs,
+		fileops.Definitions(),
+		fileops.Executor(projectRoot),
+		onChunk,
+	)
+	return out, usage, err
 }
 
 func (s *Service) loadFeatureContext(projectRoot, feature string) (featureContext, error) {
@@ -323,16 +408,84 @@ func (s *Service) loadFeatureContext(projectRoot, feature string) (featureContex
 	if tasksData, err := os.ReadFile(filepath.Join(featureDir, "tasks.md")); err == nil {
 		fc.Tasks = string(tasksData)
 	}
+	fc.ProjectStack = loadProjectStack(projectRoot)
 	return fc, nil
+}
+
+func estimateMinFileWrites(taskBlock string) int {
+	if taskBlock == "" {
+		return 1
+	}
+	lower := strings.ToLower(taskBlock)
+	if strings.Contains(lower, "develop") || strings.Contains(lower, "implement") {
+		return 2
+	}
+	return 1
+}
+
+func loadProjectStack(projectRoot string) string {
+	data, err := os.ReadFile(filepath.Join(projectRoot, ".specs/project/PROJECT.md"))
+	if err != nil {
+		return ""
+	}
+	content := string(data)
+	if idx := strings.Index(content, "## Tech Stack"); idx >= 0 {
+		content = content[idx:]
+	}
+	return truncate(content, 1200)
 }
 
 // buildImplementUserMsg constructs the user message for Run/Implement.
 // taskBlock is empty for full-feature implementation.
+func buildAskUserMsg(fc featureContext, question string, fastMode bool) string {
+	var b strings.Builder
+	b.WriteString("Feature: " + fc.Feature + "\n\n")
+	b.WriteString("## Question\n\n")
+	b.WriteString(strings.TrimSpace(question) + "\n\n")
+
+	if fc.ProjectStack != "" {
+		b.WriteString("## Project tech stack\n\n")
+		b.WriteString(fc.ProjectStack + "\n\n")
+	}
+	if fc.Spec != "" {
+		max := 5000
+		if fastMode {
+			max = 2500
+		}
+		b.WriteString("## spec.md\n\n")
+		b.WriteString(truncate(fc.Spec, max) + "\n\n")
+	}
+	if fc.Design != "" {
+		max := 4000
+		if fastMode {
+			max = 2000
+		}
+		b.WriteString("## design.md\n\n")
+		b.WriteString(truncate(fc.Design, max) + "\n\n")
+	}
+	if fc.Tasks != "" {
+		max := 3000
+		if fastMode {
+			max = 1500
+		}
+		b.WriteString("## tasks.md\n\n")
+		b.WriteString(truncate(fc.Tasks, max) + "\n\n")
+	}
+
+	b.WriteString("---\n")
+	b.WriteString("Answer the question using the documents above. Do not invent requirements not present in the specs.")
+	return b.String()
+}
+
 func buildImplementUserMsg(fc featureContext, taskBlock string, fastMode bool) string {
 	var b strings.Builder
 
 	b.WriteString("Feature: " + fc.Feature + "\n")
 	b.WriteString("Feature spec directory: .specs/features/" + fc.Feature + "/\n")
+	if fc.ProjectStack != "" {
+		b.WriteString("\n## Project tech stack (AUTHORITATIVE — override conflicting design.md frameworks)\n\n")
+		b.WriteString(fc.ProjectStack + "\n")
+	}
 
 	// List the feature dir so the model knows what files exist there.
 	if entries, err := os.ReadDir(fc.FeatureDir); err == nil {
@@ -351,8 +504,14 @@ func buildImplementUserMsg(fc featureContext, taskBlock string, fastMode bool) s
 	b.WriteString("\n")
 
 	if taskBlock != "" {
-		b.WriteString("## Task to implement\n\n")
+		b.WriteString("## Task to implement (ONLY this task — follow spec.md + design.md)\n\n")
 		b.WriteString(taskBlock + "\n\n")
+	} else if pending := project.ImplementableTasks(project.ParseTasksContent(fc.Tasks)); len(pending) > 0 {
+		b.WriteString("## Implementation checklist (all must be completed across tool calls)\n\n")
+		for _, t := range pending {
+			b.WriteString("- [ ] " + t.ID + ": " + t.Title + "\n")
+		}
+		b.WriteString("\n")
 	}
 
 	if fc.Spec != "" {
@@ -383,18 +542,27 @@ func buildImplementUserMsg(fc featureContext, taskBlock string, fastMode bool) s
 	b.WriteString("---\n")
 	b.WriteString("The spec files above are already in context. Use file tools ONLY for SOURCE CODE files (not spec/design/tasks).\n")
 	if taskBlock != "" {
-		b.WriteString("Implement the task above: read any relevant source files, then write/edit/create the necessary code files.\n")
+		b.WriteString("Implement ONLY the task above. Follow spec.md, design.md, and the project tech stack.\n")
+		b.WriteString("Create ALL files/components the task requires. Do NOT stop after one file.\n")
+		b.WriteString("Write a plain-text summary ONLY when this task is fully implemented.\n")
 	} else {
-		b.WriteString("Implement the complete feature: read any relevant source files, then write/edit/create all necessary code files.\n")
+		b.WriteString("Implement the complete feature per spec.md, design.md, and tasks.md.\n")
+		b.WriteString("Create ALL required source files. Do NOT stop after one file or a JSON summary.\n")
 	}
 
 	return b.String()
 }
 
 func extractTaskBlock(tasks, taskID string) string {
-	re := regexp.MustCompile(`(?ms)(### ` + regexp.QuoteMeta(taskID) + `:.*?)(?:\n---|\n### T|\z)`)
-	if m := re.FindStringSubmatch(tasks); len(m) > 1 {
-		return strings.TrimSpace(m[1])
+	patterns := []string{
+		`(?ms)(### ` + regexp.QuoteMeta(taskID) + `:\s*.*?)(?:\n---|\n### |\z)`,
+		`(?ms)(###[^\n]*\(` + regexp.QuoteMeta(taskID) + `\)[^\n]*\n.*?)(?:\n---|\n### |\z)`,
+	}
+	for _, pat := range patterns {
+		re := regexp.MustCompile(pat)
+		if m := re.FindStringSubmatch(tasks); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
 	}
 	return ""
 }

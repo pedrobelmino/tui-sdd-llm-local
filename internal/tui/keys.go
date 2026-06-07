@@ -25,12 +25,15 @@ type KeyMap struct {
 	Specify    key.Binding
 	GenDesign  key.Binding
 	GenTasks   key.Binding
+	QuickTask  key.Binding
+	Ask        key.Binding
 	Implement    key.Binding
 	ImplementAll key.Binding
 	RunTask      key.Binding
 	Back         key.Binding
 	Submit       key.Binding
 	CancelAction key.Binding
+	CopyLog      key.Binding
 }
 
 // DefaultKeyMap returns the tsll TUI keymap.
@@ -53,12 +56,15 @@ func DefaultKeyMap() KeyMap {
 		Specify: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "specify")),
 		GenDesign: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "design")),
 		GenTasks: key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tasks")),
+		QuickTask:   key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "quick task")),
+		Ask:         key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "ask")),
 		Implement:    key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "implement")),
 		ImplementAll: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "implement all")),
 		RunTask:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "run task")),
 		Back:         key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
 		Submit:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
 		CancelAction: key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "cancel")),
+		CopyLog:      key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy log")),
 	}
 }
 
@@ -69,7 +75,7 @@ func FooterBindings() string {
 
 // FeaturesFooter returns footer when on features view.
 func FeaturesFooter() string {
-	return "n:new │ enter:open │ s:spec │ d:design │ t:tasks │ e:impl │ j/k:nav"
+	return "n:new │ enter:open │ s:spec │ d:design │ t:tasks │ p:ask │ e:impl │ w:quick │ j/k:nav"
 }
 
 // HelpOverlay returns full help text.
@@ -93,11 +99,14 @@ func HelpOverlay() string {
 		"  s            specify (spec.md)",
 		"  d            design (design.md, needs spec)",
 		"  t            tasks (tasks.md, needs spec)",
+		"  p            ask about feature (read-only Q&A)",
 		"  e            implement feature (needs spec)",
+		"  w            quick task (ad-hoc request)",
 		"",
 		"  Feature detail",
 		"  j / k        select task",
 		"  e / enter    run selected task (needs tasks)",
+		"  p            ask about feature (read-only Q&A)",
 		"  a            implement all pending tasks (needs spec)",
 		"  s            regenerate spec",
 		"  d            regenerate design",
@@ -109,6 +118,8 @@ func HelpOverlay() string {
 		"  j / k        scroll output (during generation)",
 		"  g / G        top / bottom of output",
 		"  esc / x      cancel running action",
+		"  y            copy full action log to clipboard",
+		"  enter        reply when model asks a question",
 		"  esc          close when done",
 		"",
 		"Press ? to close",

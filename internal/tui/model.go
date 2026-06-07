@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pedrobelmino/tui-sdd-llm-local/internal/config"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/gpu"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/ollama"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/project"
@@ -74,8 +75,11 @@ type RootModel struct {
 	actionCancelled    bool
 	actionKind         ActionKind
 	actionTaskID       string
+	actionPrompt       string // quick-task prompt or follow-up instruction
 	actionPhase        string // current phase label shown in title
 	actionLog          string
+	actionNeedsInput   bool
+	actionQuestion     string
 	actionScrollLine   int
 	actionFollowTail   bool
 	actionCh           <-chan tea.Msg
@@ -92,6 +96,7 @@ type RootModel struct {
 	errBanner string
 	keymap    KeyMap
 	version   string
+	cfg       config.Config
 }
 
 // NewRootModel constructs the initial TUI state.
@@ -111,6 +116,7 @@ func NewRootModel(version string) RootModel {
 			"system":  true,
 		},
 		version: version,
+		cfg:     config.Load(),
 	}
 }
 
@@ -121,6 +127,7 @@ func (m RootModel) Init() tea.Cmd {
 		fetchOllamaCmd(),
 		fetchGPUCmd(),
 		fetchSystemCmd(),
+		warmModelCmd(),
 		tickGPUCmd(),
 		tickSystemCmd(),
 		tickOllamaCmd(),
@@ -156,6 +163,8 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					key.Matches(msg, m.keymap.Specify) ||
 					key.Matches(msg, m.keymap.GenDesign) ||
 					key.Matches(msg, m.keymap.GenTasks) ||
+					key.Matches(msg, m.keymap.QuickTask) ||
+					key.Matches(msg, m.keymap.Ask) ||
 					key.Matches(msg, m.keymap.Implement) ||
 					key.Matches(msg, m.keymap.Up) ||
 					key.Matches(msg, m.keymap.Down) ||
@@ -257,12 +266,39 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = msg.Err.Error()
 			m.actionLog += "\n\n✗ " + msg.Err.Error()
 			m.actionPhase = "error"
+			m.actionNeedsInput = false
+			m.actionQuestion = ""
 		} else {
 			m.statusMsg = ""
 			m.tokens.Add(msg.Usage.PromptTokens, msg.Usage.CompletionTokens)
+			finishText := msg.Output
+			if strings.TrimSpace(finishText) == "" {
+				finishText = m.actionLog
+			}
+			if msg.Kind != ActionAsk {
+				if q, ok := detectQuestionPrompt(finishText); ok {
+					m.actionNeedsInput = true
+					m.actionQuestion = q
+					m.actionPhase = "awaiting-input"
+					m.actionLog += fmt.Sprintf("\n\n? model needs input — press enter to answer (%d+%d tokens)",
+						msg.Usage.PromptTokens, msg.Usage.CompletionTokens)
+					m = m.scrollActionToBottom()
+					m.selectedFeature = msg.Feature
+					cmds := []tea.Cmd{loadProjectCmd()}
+					if m.actionReturnScreen == ScreenFeatureDetail {
+						cmds = append(cmds, m.loadFeatureTasksCmd(msg.Feature))
+					}
+					return m, tea.Batch(cmds...)
+				}
+			}
+			m.actionNeedsInput = false
+			m.actionQuestion = ""
 			m.actionLog += fmt.Sprintf("\n\n✓ done (%d+%d tokens)",
 				msg.Usage.PromptTokens, msg.Usage.CompletionTokens)
 			m.actionPhase = "done"
+		}
+		if m.actionLog != "" {
+			_, _ = saveActionLogFile(m.actionLog)
 		}
 		m = m.scrollActionToBottom()
 		m.selectedFeature = msg.Feature
@@ -277,6 +313,9 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.actionSpinner = (m.actionSpinner + 1) % len(spinnerFrames)
 			return m, actionTickCmd()
 		}
+
+	case ModelWarmupMsg:
+		// Best effort only; non-fatal if warmup fails.
 	}
 
 	return m, nil
@@ -307,13 +346,15 @@ func (m RootModel) View() string {
 	case ScreenAction:
 		main = m.renderAction(w, mainH)
 		if m.actionRunning {
-			footer = "j/k: scroll │ g/G: top/bottom │ esc/x: cancel"
+			footer = "j/k: scroll │ g/G: top/bottom │ y: copy log │ esc/x: cancel"
+		} else if m.actionNeedsInput {
+			footer = "enter: answer model │ j/k: scroll │ g/G: top/bottom │ y: copy log │ esc: close"
 		} else {
-			footer = "j/k: scroll │ g/G: top/bottom │ esc: close"
+			footer = "j/k: scroll │ g/G: top/bottom │ y: copy log │ esc: close"
 		}
 	case ScreenFeatureDetail:
 		main = m.renderFeatureDetailBody(w, mainH)
-		footer = "esc: back │ e: run task │ a: impl all │ s/d/t: spec/design/tasks"
+		footer = "esc: back │ p: ask │ e: run task │ a: impl all │ s/d/t: spec/design/tasks"
 	default:
 		main = m.renderBody(w, h)
 		footer = FooterBindings()
@@ -348,7 +389,7 @@ func (m RootModel) headerTitle() string {
 	if m.project.Valid {
 		proj = projectBasename(m.project.Root)
 	}
-	model := ollama.DefaultModel
+	model := m.cfg.Model
 	if len(m.ollama.Running) > 0 {
 		model = m.ollama.Running[0].Name
 	}
@@ -404,7 +445,8 @@ func (m RootModel) renderBody(width, height int) string {
 		return views.RenderModels(views.ModelsData{
 			Width: width, Height: height,
 			Tags: m.ollama.Tags, Running: m.ollama.Running,
-			Reachable: m.ollama.Reachable, DefaultModelMissing: m.ollama.DefaultModelMissing,
+			Reachable: m.ollama.Reachable, ModelMissing: m.ollama.ModelMissing,
+			ConfiguredModel: m.cfg.Model,
 			Error: m.ollama.Error,
 		})
 	case ViewMetrics:

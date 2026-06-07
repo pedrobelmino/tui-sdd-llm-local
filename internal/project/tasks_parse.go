@@ -14,8 +14,9 @@ type TaskEntry struct {
 }
 
 var (
-	taskHeaderRe = regexp.MustCompile(`^### (T\d+):\s*(.+)$`)
-	statusRowRe  = regexp.MustCompile(`^\|\s*(T\d+)\s*\|\s*([^|]+)\|`)
+	taskHeaderRe    = regexp.MustCompile(`^### (T\d+):\s*(.+)$`)
+	taskHeaderAltRe = regexp.MustCompile(`^### (?:\d+\.\s*)?(.+?)\s*\((T\d+)\)\s*$`)
+	statusRowRe     = regexp.MustCompile(`^\|\s*(T\d+)\s*\|\s*([^|]+)\|`)
 )
 
 // ParseTasks reads task IDs, titles and status from tasks.md.
@@ -49,6 +50,13 @@ func ParseTasksContent(content string) []TaskEntry {
 			titles[m[1]] = strings.TrimSpace(m[2])
 			if _, ok := statuses[m[1]]; !ok {
 				statuses[m[1]] = "Pending"
+			}
+			continue
+		}
+		if m := taskHeaderAltRe.FindStringSubmatch(trim); len(m) == 3 {
+			titles[m[2]] = strings.TrimSpace(m[1])
+			if _, ok := statuses[m[2]]; !ok {
+				statuses[m[2]] = "Pending"
 			}
 			continue
 		}

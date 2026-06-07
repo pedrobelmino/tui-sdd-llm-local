@@ -20,7 +20,7 @@ type Config struct {
 // Default returns sensible defaults.
 func Default() Config {
 	return Config{
-		Model:      "qwen2.5-coder",
+		Model:      "qwen2.5-coder:3b",
 		OllamaHost: "http://127.0.0.1:11434",
 		GPUPrefer:  "amd",
 		Theme:      "k9s",

@@ -60,3 +60,8 @@ type FeatureTasksMsg struct {
 
 // ActionTickMsg polls streaming buffer (internal).
 type ActionTickMsg struct{}
+
+// ModelWarmupMsg reports best-effort model warm-up at TUI startup.
+type ModelWarmupMsg struct {
+	Err error
+}

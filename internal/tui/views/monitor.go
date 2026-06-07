@@ -14,10 +14,11 @@ const monitorPanelTitle = "Monitor"
 
 // MonitorData is the live Ollama/GPU/token snapshot for the status strip.
 type MonitorData struct {
-	Width  int
-	Ollama ollama.Snapshot
-	GPU    gpu.Snapshot
-	Tokens tokens.SessionCounter
+	Width           int
+	Ollama          ollama.Snapshot
+	GPU             gpu.Snapshot
+	Tokens          tokens.SessionCounter
+	ConfiguredModel string
 }
 
 // RenderMonitorStrip renders a compact always-visible model + GPU status panel.
@@ -31,17 +32,20 @@ func RenderMonitorStrip(d MonitorData) string {
 
 func monitorContent(d MonitorData) string {
 	return strings.Join([]string{
-		formatOllamaLine(d.Ollama),
+		formatOllamaLine(d.Ollama, d.ConfiguredModel),
 		formatGPULine(d.GPU),
 		formatTokensLine(d.Tokens),
 	}, "\n")
 }
 
-func formatOllamaLine(snap ollama.Snapshot) string {
+func formatOllamaLine(snap ollama.Snapshot, configured string) string {
 	if !snap.Reachable {
 		return "Model: offline — Ollama unreachable"
 	}
 	if len(snap.Running) == 0 {
+		if configured != "" {
+			return "Model: · " + configured + " — not loaded in VRAM"
+		}
 		return "Model: idle — no model loaded in VRAM"
 	}
 	r := snap.Running[0]

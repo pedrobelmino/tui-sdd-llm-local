@@ -39,9 +39,24 @@ func TestInit_CreatesProjectFiles(t *testing.T) {
 		t.Fatalf("init: %v", err)
 	}
 
-	for _, f := range []string{".specs/project/PROJECT.md", ".specs/project/ROADMAP.md", ".specs/project/STATE.md"} {
+	for _, f := range []string{"AGENTS.md", ".specs/project/PROJECT.md", ".specs/project/ROADMAP.md", ".specs/project/STATE.md"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			t.Fatalf("missing %s: %v", f, err)
+		}
+	}
+	agents, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	txt := string(agents)
+	for _, want := range []string{
+		"Índice Markdown do Projeto",
+		".specs/project/PROJECT.md",
+		".specs/project/ROADMAP.md",
+		".specs/project/STATE.md",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("AGENTS.md missing %q:\n%s", want, txt)
 		}
 	}
 }

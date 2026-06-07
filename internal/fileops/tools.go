@@ -144,20 +144,66 @@ func writeFile(root string, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	rel, _ := filepath.Rel(root, path)
+	if err := validateWriteContent(rel, content); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("create dirs: %w", err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("write: %w", err)
 	}
-	rel, _ := filepath.Rel(root, path)
 	return fmt.Sprintf("wrote %s (%d bytes)", rel, len(content)), nil
+}
+
+func validateWriteContent(relPath, content string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("write_file content is empty for %s", relPath)
+	}
+	if !strings.HasSuffix(relPath, ".go") {
+		return nil
+	}
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "package ") {
+		return fmt.Errorf("Go file %s must start with a package declaration", relPath)
+	}
+	if strings.Contains(content, "import (") && !strings.Contains(content, ")") {
+		return fmt.Errorf("Go file %s looks truncated (unclosed import block)", relPath)
+	}
+	if strings.Count(content, "{") > strings.Count(content, "}") {
+		return fmt.Errorf("Go file %s looks truncated (unclosed braces)", relPath)
+	}
+	return nil
 }
 
 func readFile(root string, args map[string]any) (string, error) {
 	path, err := resolvePath(root, args)
 	if err != nil {
 		return "", err
+	}
+	if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+		entries, listErr := os.ReadDir(path)
+		if listErr != nil {
+			return "", fmt.Errorf("%s is a directory — use list_dir(path=%q) instead (list failed: %v)", path, path, listErr)
+		}
+		rel, _ := filepath.Rel(root, path)
+		if rel == "." {
+			rel = "."
+		}
+		var names []string
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() {
+				name += "/"
+			}
+			names = append(names, name)
+		}
+		if len(names) == 0 {
+			names = []string{"(empty)"}
+		}
+		return "", fmt.Errorf("%s is a directory — use list_dir(path=%q) instead. Entries: %s",
+			rel, rel, strings.Join(names, ", "))
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

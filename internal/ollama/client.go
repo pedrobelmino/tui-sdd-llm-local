@@ -13,7 +13,7 @@ import (
 
 const (
 	DefaultBaseURL = "http://127.0.0.1:11434"
-	DefaultModel   = "qwen2.5-coder"
+	DefaultModel   = "qwen2.5-coder:3b"
 	clientTimeout  = 5 * time.Second
 )
 
@@ -30,8 +30,9 @@ type Snapshot struct {
 	Running             []RunningModel
 	Reachable           bool
 	Error               string
-	DefaultModelMissing bool
-	FetchedAt           time.Time
+	ModelMissing  bool
+	CheckedModel  string
+	FetchedAt     time.Time
 }
 
 type httpClient struct {
@@ -116,11 +117,17 @@ func (c *httpClient) getJSON(ctx context.Context, path string, dest any) error {
 	return nil
 }
 
-// FetchSnapshot loads installed and running models, setting reachability and error state.
-func FetchSnapshot(ctx context.Context, c Client) Snapshot {
+// FetchSnapshot loads installed and running models, checking wantModel availability.
+// When wantModel is empty, DefaultModel is used.
+func FetchSnapshot(ctx context.Context, c Client, wantModel string) Snapshot {
+	if wantModel == "" {
+		wantModel = DefaultModel
+	}
+
 	snap := Snapshot{
-		FetchedAt: time.Now(),
-		Reachable: c.Reachable(ctx),
+		FetchedAt:    time.Now(),
+		Reachable:    c.Reachable(ctx),
+		CheckedModel: wantModel,
 	}
 
 	tags, err := c.Tags(ctx)
@@ -130,7 +137,7 @@ func FetchSnapshot(ctx context.Context, c Client) Snapshot {
 		return snap
 	}
 	snap.Tags = tags
-	snap.DefaultModelMissing = !hasDefaultModel(tags)
+	snap.ModelMissing = !HasModel(tags, wantModel)
 
 	running, err := c.Ps(ctx)
 	if err != nil {
@@ -142,9 +149,18 @@ func FetchSnapshot(ctx context.Context, c Client) Snapshot {
 	return snap
 }
 
-func hasDefaultModel(tags []TagModel) bool {
+// HasModel reports whether want is installed. Exact tag match when want includes ":";
+// otherwise any tagged variant of the base name matches (e.g. qwen2.5-coder → :latest).
+func HasModel(tags []TagModel, want string) bool {
+	if want == "" {
+		return false
+	}
 	for _, tag := range tags {
-		if strings.Contains(tag.Name, DefaultModel) {
+		name := tag.Name
+		if name == want {
+			return true
+		}
+		if !strings.Contains(want, ":") && strings.HasPrefix(name, want+":") {
 			return true
 		}
 	}

@@ -33,7 +33,7 @@ var initCmd = &cobra.Command{
 		vision := initVision
 		target := "dev solo"
 		solves := "structured spec-driven development with local AI"
-		stack := "- Language: Go\n- LLM: Ollama (qwen2.5-coder)"
+		stack := "- Language: Go\n- LLM: Ollama (qwen2.5-coder:3b)"
 		scopeIn := "- tsll workflow: init, specify, tasks, run\n- TUI dashboard"
 		scopeOut := "- Cloud APIs\n- macOS/Windows"
 
@@ -60,6 +60,7 @@ var initCmd = &cobra.Command{
 		}
 
 		for _, rel := range []string{
+			"AGENTS.md",
 			".specs/project/PROJECT.md",
 			".specs/project/ROADMAP.md",
 			".specs/project/STATE.md",

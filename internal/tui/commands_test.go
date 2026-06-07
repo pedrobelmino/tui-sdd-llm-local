@@ -104,3 +104,17 @@ func TestTickSystemCmd_NotNil(t *testing.T) {
 		t.Fatal("tickSystemCmd returned nil")
 	}
 }
+
+func TestWarmModelCmd_ReturnsWarmupMsg(t *testing.T) {
+	orig := warmModelFn
+	defer func() { warmModelFn = orig }()
+
+	warmModelFn = func() tea.Msg {
+		return ModelWarmupMsg{Err: nil}
+	}
+
+	msg := warmModelCmd()()
+	if _, ok := msg.(ModelWarmupMsg); !ok {
+		t.Fatalf("expected ModelWarmupMsg, got %T", msg)
+	}
+}

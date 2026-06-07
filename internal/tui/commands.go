@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pedrobelmino/tui-sdd-llm-local/internal/config"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/gpu"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/ollama"
 	"github.com/pedrobelmino/tui-sdd-llm-local/internal/project"
@@ -17,6 +18,7 @@ var (
 	fetchOllamaFn  = defaultFetchOllama
 	fetchGPUFn     = defaultFetchGPU
 	fetchSystemFn  = defaultFetchSystem
+	warmModelFn    = defaultWarmModel
 	sharedMonitor  = system.NewMonitor()
 )
 
@@ -40,8 +42,9 @@ func defaultLoadProject() tea.Msg {
 }
 
 func defaultFetchOllama() tea.Msg {
-	c := ollama.NewClient("")
-	snap := ollama.FetchSnapshot(context.Background(), c)
+	cfg := config.Load()
+	c := ollama.NewClient(cfg.OllamaHost)
+	snap := ollama.FetchSnapshot(context.Background(), c, cfg.Model)
 	return OllamaSnapshotMsg{Snapshot: snap}
 }
 
@@ -55,6 +58,24 @@ func defaultFetchGPU() tea.Msg {
 
 func defaultFetchSystem() tea.Msg {
 	return SystemSnapshotMsg{Snapshot: sharedMonitor.Query(context.Background())}
+}
+
+func defaultWarmModel() tea.Msg {
+	cfg := config.Load()
+	client := ollama.NewGenerateClient(cfg.OllamaHost)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	if !client.Reachable(ctx) {
+		return ModelWarmupMsg{Err: nil}
+	}
+	_, _, err := client.Chat(ctx, ollama.ChatRequest{
+		Model: cfg.Model,
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: "Warmup."},
+			{Role: "user", Content: "ok"},
+		},
+	})
+	return ModelWarmupMsg{Err: err}
 }
 
 func loadProjectCmd() tea.Cmd {
@@ -71,6 +92,10 @@ func fetchGPUCmd() tea.Cmd {
 
 func fetchSystemCmd() tea.Cmd {
 	return func() tea.Msg { return fetchSystemFn() }
+}
+
+func warmModelCmd() tea.Cmd {
+	return func() tea.Msg { return warmModelFn() }
 }
 
 func refreshCmd() tea.Cmd {

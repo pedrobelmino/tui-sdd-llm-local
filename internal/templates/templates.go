@@ -47,7 +47,7 @@ func NewProject(name, vision, target, solves, stack, scopeIn, scopeOut string) P
 ## Constraints
 
 - Platform: Linux
-- Model: qwen2.5-coder via Ollama
+- Model: qwen2.5-coder:3b via Ollama
 `, name, vision, target, solves, stack, scopeIn, scopeOut),
 		Roadmap: fmt.Sprintf(`# Roadmap
 

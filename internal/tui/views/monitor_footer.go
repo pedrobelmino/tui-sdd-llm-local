@@ -19,11 +19,12 @@ const (
 
 // FooterMonitorData is a single-line Metrics+System summary for the features footer.
 type FooterMonitorData struct {
-	Width  int
-	Ollama ollama.Snapshot
-	GPU    gpu.Snapshot
-	Tokens tokens.SessionCounter
-	System system.Snapshot
+	Width           int
+	Ollama          ollama.Snapshot
+	GPU             gpu.Snapshot
+	Tokens          tokens.SessionCounter
+	System          system.Snapshot
+	ConfiguredModel string
 }
 
 // RenderMonitorFooter renders a one-line monitor bar (tabs 4+5 summary) for the page footer.
@@ -37,7 +38,7 @@ func RenderMonitorFooter(d FooterMonitorData) string {
 
 func formatFooterMonitorLine(d FooterMonitorData) string {
 	segments := []string{
-		compactModelSegment(d.Ollama),
+		compactModelSegment(d.Ollama, d.ConfiguredModel),
 		compactGPUSegment(d.GPU),
 		compactTokensSegment(d.Tokens),
 		compactSystemSegment(d.System),
@@ -50,18 +51,17 @@ func formatFooterMonitorLine(d FooterMonitorData) string {
 	return truncateRunes(line, max)
 }
 
-func compactModelSegment(snap ollama.Snapshot) string {
+func compactModelSegment(snap ollama.Snapshot, configured string) string {
 	if !snap.Reachable {
 		return "Model offline"
 	}
 	if len(snap.Running) == 0 {
+		if configured != "" {
+			return "Model · " + configured
+		}
 		return "Model idle"
 	}
-	name := snap.Running[0].Name
-	if i := strings.Index(name, ":"); i > 0 {
-		name = name[:i]
-	}
-	return "Model ● " + name
+	return "Model ● " + snap.Running[0].Name
 }
 
 func compactGPUSegment(snap gpu.Snapshot) string {
