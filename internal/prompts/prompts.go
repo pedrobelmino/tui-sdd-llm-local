@@ -72,17 +72,15 @@ Reference:
 func ImplementSystem(projectRoot string) string {
 	implRef := LoadReference(projectRoot, "implement.md")
 	principles := LoadReference(projectRoot, "coding-principles.md")
-	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a complete feature.
-You MUST use file tools to create and edit files — do not describe changes as text.
+	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a complete feature according to its spec.
 
-Step-by-step:
-1. Call list_dir(".") first to understand the project layout.
-2. Call read_file on any file you need to inspect before editing.
-3. Call write_file / edit_file / create_dir / delete_file to apply changes.
-4. After ALL changes are applied, write a short summary (plain text, no tool call).
-
-Each tool call must be the ONLY content of your response — no extra text.
-The tool instructions and format are appended below.
+Rules:
+- Use file tools to create and edit files. Do NOT describe changes.
+- One tool call per response — no extra text before or after the JSON.
+- BEFORE editing any existing file: call read_file to verify it exists and see its content.
+- If read_file returns ERROR (file not found): call list_dir on the parent directory to find the real path, then retry.
+- Follow spec.md, design.md, and tasks.md exactly — do not invent structure or skip requirements.
+- After ALL changes are done: write a plain-text summary (no tool call tag).
 
 Coding principles:
 %s
@@ -95,15 +93,14 @@ Reference:
 func RunSystem(projectRoot, taskDesc, specContext string) string {
 	principles := LoadReference(projectRoot, "coding-principles.md")
 	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a single atomic task.
-You MUST use file tools to create and edit files — do not describe changes as text.
 
-Step-by-step:
-1. Call list_dir(".") or read_file to understand existing code first.
-2. Apply each change with write_file (new file) or edit_file (existing file).
-3. After ALL changes are applied, write a short summary (plain text, no tool call).
-
-Each tool call must be the ONLY content of your response — no extra text.
-The tool instructions and format are appended below.
+Rules:
+- Use file tools to create and edit files. Do NOT describe changes.
+- One tool call per response — no extra text before or after the JSON.
+- BEFORE editing any existing file: call read_file to verify it exists.
+- If read_file returns ERROR: call list_dir on the parent directory to find the correct path.
+- Implement exactly what the task describes — no more, no less.
+- After ALL changes are done: write a plain-text summary (no tool call tag).
 
 Coding principles:
 %s

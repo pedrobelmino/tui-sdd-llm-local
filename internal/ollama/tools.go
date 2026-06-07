@@ -182,15 +182,30 @@ func (c *genClient) ChatWithTools(
 			return response, totalUsage, nil
 		}
 
+		// Strip any nested tool-call JSON from write_file/edit_file content
+		// to prevent the model from embedding the next call inside file content.
+		tc = sanitizeToolArgs(tc)
+
 		// Execute the tool and show it in the log.
 		emit(onChunk, "🔧 %s(%s)", tc.Tool, formatArgs(tc.Args))
 		result := exec(tc.Tool, tc.Args)
-		emit(onChunk, "   ✓ %s", result)
+
+		var continuation string
+		if strings.HasPrefix(result, "ERROR") {
+			emit(onChunk, "❌ %s", result)
+			continuation = "Tool result (FAILED):\n" + result +
+				"\n\nThe tool failed. Do NOT retry the same call blindly. " +
+				"If the file does not exist, use list_dir to discover the correct path. " +
+				"If you cannot recover, stop and explain what is missing."
+		} else {
+			emit(onChunk, "   ✓ %s", result)
+			continuation = "Tool result:\n" + result + "\n\nContinue."
+		}
 
 		// Append assistant response + tool result and loop.
 		history = append(history,
 			ChatMessageWithTools{Role: "assistant", Content: response},
-			ChatMessageWithTools{Role: "user", Content: "Tool result:\n" + result + "\n\nContinue."},
+			ChatMessageWithTools{Role: "user", Content: continuation},
 		)
 	}
 
@@ -245,6 +260,24 @@ func parseToolCall(text string) (toolCallJSON, bool) {
 		}
 	}
 	return toolCallJSON{}, false
+}
+
+// sanitizeToolArgs strips any embedded tool-call JSON from string arguments
+// (e.g. a model that puts the next tool call inside write_file's "content").
+func sanitizeToolArgs(tc toolCallJSON) toolCallJSON {
+	for k, v := range tc.Args {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		// If the string value itself contains a tool call, truncate at that point.
+		for _, marker := range []string{toolCallOpen, "```{\"tool\"", "```json\n{\"tool\""} {
+			if idx := strings.Index(s, marker); idx >= 0 {
+				tc.Args[k] = s[:idx]
+			}
+		}
+	}
+	return tc
 }
 
 func parseTaggedToolCall(text string) (toolCallJSON, bool) {
