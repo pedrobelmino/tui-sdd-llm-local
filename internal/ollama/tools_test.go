@@ -12,6 +12,10 @@ import (
 // toolStreamServer simulates /api/chat with text-based tool calling:
 //  1. First call returns a <tool_call> block for "write_file"
 //  2. Second call returns a plain final answer "done writing files"
+//
+// Note: ChatWithTools now pre-loads list_dir before the first model turn,
+// so the executor will also be called for list_dir. The server only sees
+// /api/chat calls — list_dir is executed before any HTTP request.
 func toolStreamServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	call := 0
@@ -24,7 +28,6 @@ func toolStreamServer(t *testing.T) *httptest.Server {
 		call++
 
 		writeChunks := func(content string, promptTok, evalTok int) {
-			// stream content in one chunk then a done line
 			enc := json.NewEncoder(w)
 			_ = enc.Encode(ChatResponse{
 				Model:   "test",
@@ -64,7 +67,10 @@ func TestChatWithTools_ExecutesToolAndReturnsText(t *testing.T) {
 
 	var toolCalled bool
 	executor := func(name string, args map[string]any) string {
-		if name == "write_file" {
+		switch name {
+		case "list_dir":
+			return "cmd/ internal/ go.mod" // pre-load bootstrap
+		case "write_file":
 			toolCalled = true
 			return "wrote out.txt"
 		}
