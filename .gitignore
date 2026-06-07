@@ -1,0 +1,21 @@
+# Binaries
+/bin/
+bin/
+bel
+tsll
+*.exe
+
+# Go
+*.test
+*.out
+
+# Local toolchain (not part of the app)
+.tools/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+*~
