@@ -199,13 +199,7 @@ func (s *Service) Implement(ctx context.Context, projectRoot, feature string, on
 		}
 	}
 
-	user := fmt.Sprintf("Feature: %s\n\nspec.md:\n%s\n\nImplement the complete feature now. Start making file changes using tool calls. Do not explain — just call tools.", feature, string(specData))
-	if designData, err := os.ReadFile(filepath.Join(featureDir, "design.md")); err == nil {
-		user += "\n\ndesign.md:\n" + string(designData)
-	}
-	if tasksData, err := os.ReadFile(tasksPath); err == nil {
-		user += "\n\ntasks.md:\n" + string(tasksData)
-	}
+	user := buildImplementUserMsg(projectRoot, feature, featureDir, "", specData, nil)
 
 	system := prompts.ImplementSystem(projectRoot)
 	msgs := []ollama.ChatMessageWithTools{
@@ -257,21 +251,8 @@ func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, 
 		return ollama.TokenUsage{}, fmt.Errorf("task %s not found", taskID)
 	}
 
-	// Build a rich user message so the model has full context without needing
-	// to read spec/design/tasks via tools first.
-	var userParts []string
-	userParts = append(userParts, fmt.Sprintf("Feature: %s", feature))
-	userParts = append(userParts, fmt.Sprintf("Task to implement:\n%s", block))
-	if specData != nil {
-		userParts = append(userParts, fmt.Sprintf("spec.md:\n%s", truncate(string(specData), 3000)))
-	}
-	if designData, err := os.ReadFile(filepath.Join(featureDir, "design.md")); err == nil {
-		userParts = append(userParts, fmt.Sprintf("design.md:\n%s", truncate(string(designData), 2000)))
-	}
-	userParts = append(userParts, "Now implement this task using file tool calls. Read existing files if needed, then write/edit files to apply the changes.")
-
 	system := prompts.RunSystem(projectRoot, block, string(specData))
-	user := strings.Join(userParts, "\n\n")
+	user := buildImplementUserMsg(projectRoot, feature, featureDir, block, specData, nil)
 
 	msgs := []ollama.ChatMessageWithTools{
 		{Role: "system", Content: system},
@@ -295,6 +276,53 @@ func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, 
 	_ = state.AppendDecision(statePath, "Task "+taskID+" executed", truncate(out, 200), "tsll run from TUI/CLI")
 
 	return usage, nil
+}
+
+// buildImplementUserMsg constructs the user message for Run/Implement, providing
+// all spec artefacts inline so the model does not try to re-read them via tools.
+// taskBlock is empty for full-feature implementation (Implement without tasks.md).
+func buildImplementUserMsg(projectRoot, feature, featureDir, taskBlock string, specData []byte, _ []byte) string {
+	var b strings.Builder
+
+	b.WriteString("Feature: " + feature + "\n")
+	b.WriteString("Feature spec directory: .specs/features/" + feature + "/\n")
+
+	// List the feature dir so the model knows what files exist there.
+	if entries, err := os.ReadDir(featureDir); err == nil {
+		b.WriteString("Files in .specs/features/" + feature + "/:\n")
+		for _, e := range entries {
+			b.WriteString("  " + e.Name() + "\n")
+		}
+	}
+	b.WriteString("\n")
+
+	if taskBlock != "" {
+		b.WriteString("## Task to implement\n\n")
+		b.WriteString(taskBlock + "\n\n")
+	}
+
+	if len(specData) > 0 {
+		b.WriteString("## spec.md (already loaded — do NOT read via tool)\n\n")
+		b.WriteString(truncate(string(specData), 3000) + "\n\n")
+	}
+	if designData, err := os.ReadFile(filepath.Join(featureDir, "design.md")); err == nil {
+		b.WriteString("## design.md (already loaded — do NOT read via tool)\n\n")
+		b.WriteString(truncate(string(designData), 2000) + "\n\n")
+	}
+	if tasksData, err := os.ReadFile(filepath.Join(featureDir, "tasks.md")); err == nil {
+		b.WriteString("## tasks.md (already loaded — do NOT read via tool)\n\n")
+		b.WriteString(truncate(string(tasksData), 1500) + "\n\n")
+	}
+
+	b.WriteString("---\n")
+	b.WriteString("The spec files above are already in context. Use file tools ONLY for SOURCE CODE files (not spec/design/tasks).\n")
+	if taskBlock != "" {
+		b.WriteString("Implement the task above: read any relevant source files, then write/edit/create the necessary code files.\n")
+	} else {
+		b.WriteString("Implement the complete feature: read any relevant source files, then write/edit/create all necessary code files.\n")
+	}
+
+	return b.String()
 }
 
 func extractTaskBlock(tasks, taskID string) string {

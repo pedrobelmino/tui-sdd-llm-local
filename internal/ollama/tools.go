@@ -121,10 +121,12 @@ func (c *genClient) ChatWithTools(
 		}
 		emit(onChunk, "   %s\n", ldResult)
 
-		// Find the last user message and append the layout.
+		// Find the last user message and append layout + clear instruction.
 		for i := len(history) - 1; i >= 0; i-- {
 			if history[i].Role == "user" {
-				history[i].Content += "\n\nProject layout (list_dir \".\"):\n" + ldResult +
+				history[i].Content += "\n\nProject root layout (list_dir \".\"):\n" + ldResult +
+					"\n\nNOTE: All spec/design/tasks files for the feature are already provided above in the message. " +
+					"Do NOT read them via read_file — use tools only for SOURCE CODE files." +
 					"\n\nStart making file changes now — respond with a <tool_call> block."
 				break
 			}
