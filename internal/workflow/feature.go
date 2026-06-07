@@ -208,13 +208,18 @@ func (s *Service) Implement(ctx context.Context, projectRoot, feature string, on
 	}
 
 	system := prompts.ImplementSystem(projectRoot)
-	out, usage, err := s.client.ChatStream(ctx, ollama.ChatRequest{
-		Model: s.cfg.Model,
-		Messages: []ollama.ChatMessage{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
-		},
-	}, onChunk)
+	msgs := []ollama.ChatMessageWithTools{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}
+
+	toolCtx := ollama.WithModel(ctx, s.cfg.Model)
+	out, usage, err := s.client.ChatWithTools(
+		toolCtx, msgs,
+		fileops.Definitions(),
+		fileops.Executor(projectRoot),
+		onChunk,
+	)
 	if err != nil {
 		return usage, err
 	}

@@ -1,12 +1,10 @@
 package ollama
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"strings"
 )
 
 // --- Tool types ---
@@ -26,9 +24,9 @@ type ToolFunction struct {
 
 // ToolParameters is a JSON-Schema object for tool input.
 type ToolParameters struct {
-	Type       string                       `json:"type"` // "object"
+	Type       string                        `json:"type"` // "object"
 	Properties map[string]ToolPropertySchema `json:"properties"`
-	Required   []string                     `json:"required,omitempty"`
+	Required   []string                      `json:"required,omitempty"`
 }
 
 // ToolPropertySchema describes a single parameter field.
@@ -37,63 +35,50 @@ type ToolPropertySchema struct {
 	Description string `json:"description"`
 }
 
-// ToolCall is a tool invocation returned by the model.
-type ToolCall struct {
-	Function ToolCallFunction `json:"function"`
-}
-
-// ToolCallFunction holds the called tool name and its arguments.
-type ToolCallFunction struct {
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
-}
-
-// --- Extended message and request types ---
-
-// ChatMessageWithTools extends ChatMessage to carry optional tool_calls.
-type ChatMessageWithTools struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-}
-
-// ChatRequestWithTools is the Ollama /api/chat payload that includes tools.
-type ChatRequestWithTools struct {
-	Model    string                 `json:"model"`
-	Messages []ChatMessageWithTools `json:"messages"`
-	Tools    []ToolDef              `json:"tools,omitempty"`
-	Stream   bool                   `json:"stream"`
-}
-
-// ChatResponseWithTools is the response chunk when tools may be involved.
-type ChatResponseWithTools struct {
-	Model           string               `json:"model"`
-	Message         ChatMessageWithTools `json:"message"`
-	Done            bool                 `json:"done"`
-	PromptEvalCount int                  `json:"prompt_eval_count"`
-	EvalCount       int                  `json:"eval_count"`
-	Error           string               `json:"error,omitempty"`
-}
-
 // ToolExecutor is called for each tool invocation; returns a result string.
 type ToolExecutor func(toolName string, args map[string]any) string
 
 // --- GenerateClient extension ---
 
-// GenerateClientWithTools extends GenerateClient with tool-calling support.
+// GenerateClientWithTools extends GenerateClient with text-based tool-calling support.
+// Works with any model (does not require native function-calling support).
 // NewGenerateClient returns a value that satisfies this interface.
 type GenerateClientWithTools interface {
 	GenerateClient
-	// ChatWithTools runs a tool-use loop: the model can invoke tools until it
-	// stops calling them and produces a final text answer.
-	// onChunk receives both streamed text tokens and tool-invocation status lines.
+	// ChatWithTools streams a tool-use loop until the model stops calling tools.
+	// Tool invocations are parsed from the model's text output using a
+	// structured tag format — no native function-calling API required.
 	ChatWithTools(ctx context.Context, msgs []ChatMessageWithTools, tools []ToolDef, exec ToolExecutor, onChunk func(string)) (string, TokenUsage, error)
+}
+
+// ChatMessageWithTools is a regular chat message (tool_calls field kept for
+// future compatibility but not used in text-based mode).
+type ChatMessageWithTools struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 // Ensure genClient satisfies GenerateClientWithTools at compile time.
 var _ GenerateClientWithTools = (*genClient)(nil)
 
-// ChatWithTools is implemented on genClient so it satisfies the interface.
+const (
+	toolCallOpen  = "<tool_call>"
+	toolCallClose = "</tool_call>"
+	maxToolIter   = 30 // prevent infinite loops
+)
+
+// toolCallJSON is the JSON payload inside a <tool_call> block.
+type toolCallJSON struct {
+	Tool string         `json:"tool"`
+	Args map[string]any `json:"args"`
+}
+
+// ChatWithTools runs a streaming tool-use loop.
+//
+// The model is instructed (via the system prompt injected by BuildToolsSystemAddendum)
+// to respond with <tool_call>{"tool":"name","args":{...}}</tool_call> when it wants
+// to invoke a tool. We stream the response, detect tool-call blocks, execute them,
+// and continue the conversation until the model produces a final text answer.
 func (c *genClient) ChatWithTools(
 	ctx context.Context,
 	msgs []ChatMessageWithTools,
@@ -102,81 +87,138 @@ func (c *genClient) ChatWithTools(
 	onChunk func(string),
 ) (string, TokenUsage, error) {
 	var totalUsage TokenUsage
-	history := append([]ChatMessageWithTools(nil), msgs...)
 
-	for {
-		req := ChatRequestWithTools{
-			Model:    "",    // caller sets model via msgs context; set below
-			Messages: history,
-			Tools:    tools,
-			Stream:   false,
-		}
-		// Extract model from context value if set, else leave empty (Ollama uses default).
-		if m := ctx.Value(ctxKeyModel{}); m != nil {
-			req.Model, _ = m.(string)
-		}
+	model := ""
+	if m := ctx.Value(ctxKeyModel{}); m != nil {
+		model, _ = m.(string)
+	}
 
-		body, err := json.Marshal(req)
-		if err != nil {
-			return "", totalUsage, err
+	// Inject tool instructions into the last system message (or prepend one).
+	history := injectToolInstructions(msgs, tools)
+
+	for iter := 0; iter < maxToolIter; iter++ {
+		// Convert to plain ChatMessages for ChatStream.
+		plain := make([]ChatMessage, len(history))
+		for i, m := range history {
+			plain[i] = ChatMessage{Role: m.Role, Content: m.Content}
 		}
 
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
-		if err != nil {
-			return "", totalUsage, err
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-
-		resp, err := c.http.Do(httpReq)
-		if err != nil {
-			return "", totalUsage, err
-		}
-		body2, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return "", totalUsage, err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return "", totalUsage, fmt.Errorf("ollama tools: %d: %s", resp.StatusCode, string(body2))
-		}
-
-		var out ChatResponseWithTools
-		if err := json.Unmarshal(body2, &out); err != nil {
-			return "", totalUsage, fmt.Errorf("ollama tools decode: %w", err)
-		}
-		if out.Error != "" {
-			return "", totalUsage, fmt.Errorf("ollama: %s", out.Error)
-		}
-
-		totalUsage.PromptTokens += out.PromptEvalCount
-		totalUsage.CompletionTokens += out.EvalCount
-
-		// Append assistant message to history.
-		history = append(history, out.Message)
-
-		if len(out.Message.ToolCalls) == 0 {
-			// No tool calls — final text response.
-			if onChunk != nil && out.Message.Content != "" {
-				onChunk(out.Message.Content)
-			}
-			return out.Message.Content, totalUsage, nil
-		}
-
-		// Execute each tool call and collect results.
-		for _, tc := range out.Message.ToolCalls {
+		// Stream the response, accumulating full text.
+		var buf strings.Builder
+		streamOnChunk := func(chunk string) {
+			buf.WriteString(chunk)
 			if onChunk != nil {
-				onChunk(fmt.Sprintf("\n🔧 %s(%s)\n", tc.Function.Name, formatArgs(tc.Function.Arguments)))
+				onChunk(chunk)
 			}
-			result := exec(tc.Function.Name, tc.Function.Arguments)
-			if onChunk != nil {
-				onChunk("   ✓ " + result + "\n")
-			}
-			history = append(history, ChatMessageWithTools{
-				Role:    "tool",
-				Content: result,
-			})
+		}
+
+		_, usage, err := c.ChatStream(ctx, ChatRequest{
+			Model:    model,
+			Messages: plain,
+		}, streamOnChunk)
+		totalUsage.PromptTokens += usage.PromptTokens
+		totalUsage.CompletionTokens += usage.CompletionTokens
+		if err != nil {
+			return buf.String(), totalUsage, err
+		}
+
+		response := buf.String()
+
+		// Check for tool call tag in the response.
+		tc, found := parseToolCall(response)
+		if !found {
+			// No tool call — final answer.
+			return response, totalUsage, nil
+		}
+
+		// Strip the tool_call block from the displayed text (already streamed).
+		// Notify about execution.
+		if onChunk != nil {
+			onChunk(fmt.Sprintf("\n🔧 %s(%s)\n", tc.Tool, formatArgs(tc.Args)))
+		}
+		result := exec(tc.Tool, tc.Args)
+		if onChunk != nil {
+			onChunk("   ✓ " + result + "\n")
+		}
+
+		// Append assistant response + tool result to history and loop.
+		history = append(history,
+			ChatMessageWithTools{Role: "assistant", Content: response},
+			ChatMessageWithTools{Role: "user", Content: "Tool result: " + result + "\n\nContinue."},
+		)
+	}
+
+	return "", totalUsage, fmt.Errorf("tool-calling loop exceeded %d iterations", maxToolIter)
+}
+
+// parseToolCall extracts the first <tool_call>...</tool_call> block from text.
+func parseToolCall(text string) (toolCallJSON, bool) {
+	start := strings.Index(text, toolCallOpen)
+	if start < 0 {
+		return toolCallJSON{}, false
+	}
+	inner := text[start+len(toolCallOpen):]
+	end := strings.Index(inner, toolCallClose)
+	if end < 0 {
+		return toolCallJSON{}, false
+	}
+	raw := strings.TrimSpace(inner[:end])
+	var tc toolCallJSON
+	if err := json.Unmarshal([]byte(raw), &tc); err != nil {
+		return toolCallJSON{}, false
+	}
+	if tc.Tool == "" {
+		return toolCallJSON{}, false
+	}
+	return tc, true
+}
+
+// injectToolInstructions adds the tool-usage instructions to the system prompt.
+func injectToolInstructions(msgs []ChatMessageWithTools, tools []ToolDef) []ChatMessageWithTools {
+	if len(tools) == 0 {
+		return msgs
+	}
+	addendum := buildToolsAddendum(tools)
+
+	// Find existing system message and extend it.
+	result := append([]ChatMessageWithTools(nil), msgs...)
+	for i, m := range result {
+		if m.Role == "system" {
+			result[i].Content = m.Content + "\n\n" + addendum
+			return result
 		}
 	}
+	// No system message — prepend one.
+	return append([]ChatMessageWithTools{{Role: "system", Content: addendum}}, result...)
+}
+
+// buildToolsAddendum returns the text block appended to the system prompt.
+func buildToolsAddendum(tools []ToolDef) string {
+	var sb strings.Builder
+	sb.WriteString("## File Tools\n\n")
+	sb.WriteString("You have access to file system tools. When you want to call a tool, respond with\n")
+	sb.WriteString("ONLY the tool call block below — no other text on that turn:\n\n")
+	sb.WriteString("<tool_call>\n")
+	sb.WriteString("{\"tool\": \"TOOL_NAME\", \"args\": {\"param\": \"value\"}}\n")
+	sb.WriteString("</tool_call>\n\n")
+	sb.WriteString("After the tool executes you will receive its output and must continue.\n")
+	sb.WriteString("When all tools are done, write your final summary as normal text.\n\n")
+	sb.WriteString("Available tools:\n")
+	for _, t := range tools {
+		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Function.Name, t.Function.Description))
+		sb.WriteString("  Parameters:\n")
+		for pname, pschema := range t.Function.Parameters.Properties {
+			req := ""
+			for _, r := range t.Function.Parameters.Required {
+				if r == pname {
+					req = " (required)"
+				}
+			}
+			sb.WriteString(fmt.Sprintf("  - `%s` (%s)%s: %s\n", pname, pschema.Type, req, pschema.Description))
+		}
+	}
+	sb.WriteString("\nIMPORTANT: Use tools to actually create and modify files. Do not just describe what you would do.")
+	return sb.String()
 }
 
 type ctxKeyModel struct{}
@@ -198,9 +240,5 @@ func formatArgs(args map[string]any) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	out := parts[0]
-	for _, p := range parts[1:] {
-		out += ", " + p
-	}
-	return out
+	return strings.Join(parts, ", ")
 }

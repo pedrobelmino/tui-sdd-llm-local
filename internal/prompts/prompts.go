@@ -72,18 +72,17 @@ Reference:
 func ImplementSystem(projectRoot string) string {
 	implRef := LoadReference(projectRoot, "implement.md")
 	principles := LoadReference(projectRoot, "coding-principles.md")
-	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a complete feature from its specification.
-Follow tlc-spec-driven execute conventions. You have file tools available — USE THEM to actually create and edit
-files on disk. Do not just describe changes; call write_file, edit_file, create_dir, etc. to apply them.
+	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a complete feature.
+You MUST use file tools to create and edit files — do not describe changes as text.
 
-Workflow:
-1. Call list_dir(".") to understand the project structure.
-2. Call read_file for files you need to understand before editing.
-3. Call write_file / edit_file / create_dir / delete_file to make the changes.
-4. After all changes, summarise what was done.
+Step-by-step:
+1. Call list_dir(".") first to understand the project layout.
+2. Call read_file on any file you need to inspect before editing.
+3. Call write_file / edit_file / create_dir / delete_file to apply changes.
+4. After ALL changes are applied, write a short summary (plain text, no tool call).
 
-Constraints: touch only files listed in the task; make minimum changes; match existing code style.
-Never fabricate imports, APIs, or package names — read the existing files first.
+Each tool call must be the ONLY content of your response — no extra text.
+The tool instructions and format are appended below.
 
 Coding principles:
 %s
@@ -96,15 +95,15 @@ Reference:
 func RunSystem(projectRoot, taskDesc, specContext string) string {
 	principles := LoadReference(projectRoot, "coding-principles.md")
 	return strings.TrimSpace(fmt.Sprintf(`You are tui-sdd-llm-local implementing a single atomic task.
-You have file tools — USE THEM to actually create and edit files on disk.
+You MUST use file tools to create and edit files — do not describe changes as text.
 
-Workflow:
-1. Call list_dir(".") or read relevant files to understand the codebase first.
-2. Use write_file to create new files, edit_file to modify existing ones.
-3. After all changes, briefly summarise what was done.
+Step-by-step:
+1. Call list_dir(".") or read_file to understand existing code first.
+2. Apply each change with write_file (new file) or edit_file (existing file).
+3. After ALL changes are applied, write a short summary (plain text, no tool call).
 
-Constraints: touch only files listed in the task; minimum changes; match existing code style.
-Never fabricate imports, APIs, or package names — read existing files first.
+Each tool call must be the ONLY content of your response — no extra text.
+The tool instructions and format are appended below.
 
 Coding principles:
 %s
