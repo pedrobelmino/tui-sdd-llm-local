@@ -116,6 +116,9 @@ func (c *genClient) ChatWithTools(
 	if exec != nil && len(tools) > 0 {
 		emit(onChunk, "📂 loading project layout…")
 		ldResult := exec("list_dir", map[string]any{"path": "."})
+		if ldResult == "" {
+			ldResult = "(empty)"
+		}
 		emit(onChunk, "   %s\n", ldResult)
 
 		// Find the last user message and append the layout.
@@ -129,42 +132,33 @@ func (c *genClient) ChatWithTools(
 	}
 
 	for iter := 0; iter < maxToolIter; iter++ {
-		emit(onChunk, "\n── turn %d ──", iter+1)
-
 		// Convert to plain ChatMessages for ChatStream.
 		plain := make([]ChatMessage, len(history))
 		for i, h := range history {
 			plain[i] = ChatMessage{Role: h.Role, Content: h.Content}
 		}
 
-		// Stream the response, accumulating full text.
+		// Stream the response into buf; suppress raw model text from the visible log
+		// (it's mostly the tool-call JSON or an intermediate plan — not user-friendly).
 		var buf strings.Builder
-		streamOnChunk := func(chunk string) {
-			buf.WriteString(chunk)
-			if onChunk != nil {
-				onChunk(chunk)
-			}
-		}
-
-		emit(onChunk, " [streaming…]")
 		_, usage, err := c.ChatStream(ctx, ChatRequest{
 			Model:    model,
 			Messages: plain,
-		}, streamOnChunk)
+		}, func(chunk string) { buf.WriteString(chunk) })
 		totalUsage.PromptTokens += usage.PromptTokens
 		totalUsage.CompletionTokens += usage.CompletionTokens
 
 		response := strings.TrimSpace(buf.String())
-		emit(onChunk, "\n   [%d prompt + %d completion tokens]", usage.PromptTokens, usage.CompletionTokens)
 
 		if err != nil {
-			emit(onChunk, "\n❌ stream error: %v", err)
+			emit(onChunk, "❌ error on turn %d: %v", iter+1, err)
 			return response, totalUsage, err
 		}
 
 		if response == "" {
-			emit(onChunk, "\n⚠ model returned empty response — stopping")
-			return response, totalUsage, fmt.Errorf("model returned empty response on turn %d", iter+1)
+			msg := fmt.Sprintf("model returned empty response on turn %d (%d prompt tokens)", iter+1, usage.PromptTokens)
+			emit(onChunk, "❌ %s", msg)
+			return response, totalUsage, fmt.Errorf("%s", msg)
 		}
 
 		// Check for tool call tag in the response.
@@ -172,22 +166,24 @@ func (c *genClient) ChatWithTools(
 		if !found {
 			// If iter==0 and the model wrote a plan instead of a tool call, nudge once.
 			if iter == 0 && looksLikePlan(response) {
-				emit(onChunk, "\n⚠ model described instead of acting — nudging…")
+				emit(onChunk, "⚠  model wrote a plan instead of calling tools — retrying…")
 				history = append(history,
 					ChatMessageWithTools{Role: "assistant", Content: response},
 					ChatMessageWithTools{Role: "user", Content: "Do not describe. Respond with a <tool_call> block to start making file changes."},
 				)
 				continue
 			}
-			// Final answer — no more tool calls.
-			emit(onChunk, "\n✅ no more tool calls — done")
+			// Final answer — stream it to the log now that we know it's the summary.
+			if onChunk != nil {
+				onChunk(response)
+			}
 			return response, totalUsage, nil
 		}
 
-		// Execute the tool.
-		emit(onChunk, "\n🔧 %s(%s)", tc.Tool, formatArgs(tc.Args))
+		// Execute the tool and show it in the log.
+		emit(onChunk, "🔧 %s(%s)", tc.Tool, formatArgs(tc.Args))
 		result := exec(tc.Tool, tc.Args)
-		emit(onChunk, "\n   ✓ %s", result)
+		emit(onChunk, "   ✓ %s", result)
 
 		// Append assistant response + tool result and loop.
 		history = append(history,

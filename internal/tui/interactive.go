@@ -465,8 +465,16 @@ func detectPhase(chunk, current string) string {
 	switch {
 	case strings.HasPrefix(t, "🔧"):
 		return "tool-call"
+	case strings.HasPrefix(t, "   ✓"):
+		return "tool-done"
 	case strings.HasPrefix(t, "✓"):
 		return "tool-done"
+	case strings.HasPrefix(t, "📂"):
+		return "loading"
+	case strings.HasPrefix(t, "⚠"):
+		return "generating"
+	case strings.HasPrefix(t, "❌"):
+		return "error"
 	case strings.HasPrefix(t, "---"):
 		return "task-start"
 	case t != "":
@@ -479,7 +487,9 @@ func detectPhase(chunk, current string) string {
 func phaseLabel(phase string) string {
 	switch phase {
 	case "waiting":
-		return "waiting for model…"
+		return "waiting…"
+	case "loading":
+		return "loading layout…"
 	case "generating":
 		return "generating"
 	case "tool-call":
