@@ -75,10 +75,14 @@ type toolCallJSON struct {
 
 // ChatWithTools runs a streaming tool-use loop.
 //
-// The model is instructed (via the system prompt injected by BuildToolsSystemAddendum)
+// The model is instructed (via the system prompt injected by injectToolInstructions)
 // to respond with <tool_call>{"tool":"name","args":{...}}</tool_call> when it wants
 // to invoke a tool. We stream the response, detect tool-call blocks, execute them,
 // and continue the conversation until the model produces a final text answer.
+//
+// Bootstrap: we always pre-seed the conversation by executing list_dir(".") ourselves
+// and showing the result to the model. This gives the model the project structure
+// upfront and primes the few-shot pattern so it knows the expected format.
 func (c *genClient) ChatWithTools(
 	ctx context.Context,
 	msgs []ChatMessageWithTools,
@@ -95,6 +99,25 @@ func (c *genClient) ChatWithTools(
 
 	// Inject tool instructions into the last system message (or prepend one).
 	history := injectToolInstructions(msgs, tools)
+
+	// Bootstrap: pre-execute list_dir(".") and inject it as a completed exchange.
+	// This gives the model the project layout and demonstrates the tool-call format.
+	if exec != nil && len(tools) > 0 {
+		ldResult := exec("list_dir", map[string]any{"path": "."})
+		if onChunk != nil {
+			onChunk("🔧 list_dir(.)\n   ✓ " + ldResult + "\n\n")
+		}
+		history = append(history,
+			ChatMessageWithTools{
+				Role:    "assistant",
+				Content: toolCallOpen + "\n{\"tool\":\"list_dir\",\"args\":{\"path\":\".\"}}"+toolCallClose,
+			},
+			ChatMessageWithTools{
+				Role:    "user",
+				Content: "Tool result:\n" + ldResult + "\n\nUse the file tools to make all necessary changes now.",
+			},
+		)
+	}
 
 	for iter := 0; iter < maxToolIter; iter++ {
 		// Convert to plain ChatMessages for ChatStream.
@@ -127,7 +150,17 @@ func (c *genClient) ChatWithTools(
 		// Check for tool call tag in the response.
 		tc, found := parseToolCall(response)
 		if !found {
-			// No tool call — final answer.
+			// No tool call found. If this is the very first model turn (iter==0)
+			// and the response looks like a plan/description rather than a summary,
+			// nudge the model to actually start calling tools.
+			if iter == 0 && looksLikePlan(response) {
+				history = append(history,
+					ChatMessageWithTools{Role: "assistant", Content: response},
+					ChatMessageWithTools{Role: "user", Content: "Stop describing. Start making file changes now — respond with a <tool_call> block."},
+				)
+				continue
+			}
+			// Final answer.
 			return response, totalUsage, nil
 		}
 
@@ -196,13 +229,20 @@ func injectToolInstructions(msgs []ChatMessageWithTools, tools []ToolDef) []Chat
 func buildToolsAddendum(tools []ToolDef) string {
 	var sb strings.Builder
 	sb.WriteString("## File Tools\n\n")
-	sb.WriteString("You have access to file system tools. When you want to call a tool, respond with\n")
-	sb.WriteString("ONLY the tool call block below — no other text on that turn:\n\n")
-	sb.WriteString("<tool_call>\n")
+	sb.WriteString("You MUST use the file tools below to create and modify files.\n")
+	sb.WriteString("Each tool call is your ENTIRE response — no extra text before or after.\n\n")
+	sb.WriteString("Format:\n")
+	sb.WriteString(toolCallOpen + "\n")
 	sb.WriteString("{\"tool\": \"TOOL_NAME\", \"args\": {\"param\": \"value\"}}\n")
-	sb.WriteString("</tool_call>\n\n")
-	sb.WriteString("After the tool executes you will receive its output and must continue.\n")
-	sb.WriteString("When all tools are done, write your final summary as normal text.\n\n")
+	sb.WriteString(toolCallClose + "\n\n")
+	sb.WriteString("After execution you receive the result and MUST continue with the next tool call or final summary.\n\n")
+	sb.WriteString("Example session:\n")
+	sb.WriteString("  User: implement the feature\n")
+	sb.WriteString("  You: " + toolCallOpen + "{\"tool\":\"read_file\",\"args\":{\"path\":\"go.mod\"}}" + toolCallClose + "\n")
+	sb.WriteString("  User: Tool result: module github.com/example/app go 1.22\n")
+	sb.WriteString("  You: " + toolCallOpen + "{\"tool\":\"write_file\",\"args\":{\"path\":\"internal/foo.go\",\"content\":\"package foo\\n\"}}" + toolCallClose + "\n")
+	sb.WriteString("  User: Tool result: wrote internal/foo.go\n")
+	sb.WriteString("  You: Done. Created internal/foo.go with package foo.\n\n")
 	sb.WriteString("Available tools:\n")
 	for _, t := range tools {
 		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Function.Name, t.Function.Description))
@@ -217,7 +257,7 @@ func buildToolsAddendum(tools []ToolDef) string {
 			sb.WriteString(fmt.Sprintf("  - `%s` (%s)%s: %s\n", pname, pschema.Type, req, pschema.Description))
 		}
 	}
-	sb.WriteString("\nIMPORTANT: Use tools to actually create and modify files. Do not just describe what you would do.")
+	sb.WriteString("\nCRITICAL: Do NOT describe what you will do. Do NOT write explanations. Call the tools directly.")
 	return sb.String()
 }
 
@@ -226,6 +266,24 @@ type ctxKeyModel struct{}
 // WithModel attaches the model name to a context for ChatWithTools.
 func WithModel(ctx context.Context, model string) context.Context {
 	return context.WithValue(ctx, ctxKeyModel{}, model)
+}
+
+// looksLikePlan returns true when the model response looks like a plan/description
+// rather than a final summary — heuristic to detect "I will do X" style responses.
+func looksLikePlan(text string) bool {
+	lower := strings.ToLower(text)
+	planPhrases := []string{
+		"i will", "i'll", "i would", "i'm going to", "i plan to",
+		"next, i", "first, i", "let me", "proceed to",
+		"will create", "will write", "will implement", "will add",
+		"steps:", "step 1", "step 2",
+	}
+	for _, p := range planPhrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatArgs(args map[string]any) string {

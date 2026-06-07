@@ -199,7 +199,7 @@ func (s *Service) Implement(ctx context.Context, projectRoot, feature string, on
 		}
 	}
 
-	user := fmt.Sprintf("Feature: %s\n\nspec.md:\n%s\n\nImplement the complete feature now.", feature, string(specData))
+	user := fmt.Sprintf("Feature: %s\n\nspec.md:\n%s\n\nImplement the complete feature now. Start making file changes using tool calls. Do not explain — just call tools.", feature, string(specData))
 	if designData, err := os.ReadFile(filepath.Join(featureDir, "design.md")); err == nil {
 		user += "\n\ndesign.md:\n" + string(designData)
 	}
@@ -258,7 +258,7 @@ func (s *Service) Run(ctx context.Context, projectRoot, feature, taskID string, 
 	}
 
 	system := prompts.RunSystem(projectRoot, block, string(specData))
-	user := fmt.Sprintf("Implement task %s now. Use the file tools to create, read, and edit files as needed.", taskID)
+	user := fmt.Sprintf("Implement task %s. Start making file changes now using tool calls. Do not explain — just call tools.", taskID)
 
 	msgs := []ollama.ChatMessageWithTools{
 		{Role: "system", Content: system},
