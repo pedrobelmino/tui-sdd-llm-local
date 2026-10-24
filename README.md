@@ -370,3 +370,7 @@ Issues e PRs são bem-vindos. Antes de abrir um PR:
   <strong>Feito para devs solo que querem estrutura, visibilidade e IA local.</strong><br>
   <code>tsll</code> — do spec ao código, no terminal.
 </p>
+
+## Licença
+
+MIT — veja [LICENSE](LICENSE).
